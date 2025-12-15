@@ -1,0 +1,9 @@
+PORT=8080
+JOBS_ROOT=D:\silkcards-parser\jobs
+API_KEY=REPLACE_WITH_STRONG_KEY
+MAX_UPLOAD_MB=200
+ILLUSTRATOR_TIMEOUT_SEC=300
+ILLUSTRATOR_PATH=C:\Program Files\Adobe\Adobe Illustrator 2025\Support Files\Contents\Windows\Illustrator.exe
+SCRIPTS_DIR=D:\silkcards-parser\scripts
+BASE_URL=http://54.198.104.149:8080
+MOCK_ILLUSTRATOR=0

@@ -1,9 +1,13 @@
 import Database from "better-sqlite3";
-import { JOBS_ROOT } from "./config.js";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const dbPath = path.join(JOBS_ROOT, "..", "server", "parser.db");
+// Get the directory where this file is located (server/src)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+// Database goes in server/ directory (parent of src/)
+const dbPath = path.join(__dirname, "..", "parser.db");
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
 export const db = new Database(dbPath);

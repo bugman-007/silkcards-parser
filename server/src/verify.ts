@@ -22,7 +22,8 @@ export async function verifyOutputsAndBuildMeta(jobId: string, outDir: string) {
     plates: files.map((f) => {
       const base = f.replace(/\.(png|svg)$/i, "");
       const url = `${BASE_URL}/assets/${jobId}/out/${f}`.replace(/\\/g, "/");
-      // crude type inference
+      
+      // Crude type inference
       let type: any = "UNKNOWN";
       if (base.endsWith("_mask")) {
         if (base.includes("_spot_uv_")) type = "SPOT_UV_MASK";
@@ -32,10 +33,41 @@ export async function verifyOutputsAndBuildMeta(jobId: string, outDir: string) {
       } else {
         type = "PRINT";
       }
+      
+      // Infer side from filename (front/back)
+      let side: "front" | "back" = "front";
+      const lowerBase = base.toLowerCase();
+      if (lowerBase.includes("_back_") || lowerBase.startsWith("back_")) {
+        side = "back";
+      } else if (lowerBase.includes("_front_") || lowerBase.startsWith("front_")) {
+        side = "front";
+      }
+      
+      // Build assets object
+      const isSvg = f.toLowerCase().endsWith(".svg");
+      const assets: any = {};
+      if (isSvg) {
+        assets.svg = url;
+      } else {
+        // For masks, use maskPng; for emboss height, use heightPng; otherwise png
+        if (type === "EMBOSS" && base.includes("height")) {
+          assets.heightPng = url;
+        } else if (type !== "PRINT") {
+          assets.maskPng = url;
+        } else {
+          assets.png = url;
+        }
+      }
+      
       return {
         id: base,
+        aiLayerName: base, // Use base filename as layer name
+        side,
+        depthIndex: 0, // Default to 0, should be extracted from Illustrator export
+        physicalPlyIndex: 0, // Default to 0, should be extracted from Illustrator export
+        face: side, // Same as side
         type,
-        assets: f.toLowerCase().endsWith(".svg") ? { svg: url } : { png: url }
+        assets
       };
     }),
     validation: { passed: true, warnings: [], errors: [] }

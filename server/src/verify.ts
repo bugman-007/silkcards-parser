@@ -6,6 +6,20 @@ function listFiles(dir: string) {
   return fs.readdirSync(dir).filter(f => fs.statSync(path.join(dir, f)).isFile());
 }
 
+function parseDepthIndexFromLayerName(name: string): number {
+  // Supports: front_layer_0_print, back_layer_12_foil_gold_mask, etc.
+  const m = name.match(/^(front|back)_layer_(\d+)_/i);
+  if (!m) return 0;
+  const n = Number(m[2]);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function inferSideFromLayerName(name: string): "front" | "back" {
+  const lower = name.toLowerCase();
+  if (lower.startsWith("back_") || lower.includes("_back_")) return "back";
+  return "front";
+}
+
 export async function verifyOutputsAndBuildMeta(jobId: string, outDir: string) {
   const files = listFiles(outDir);
 
@@ -23,34 +37,43 @@ export async function verifyOutputsAndBuildMeta(jobId: string, outDir: string) {
       const base = f.replace(/\.(png|svg)$/i, "");
       const url = `${BASE_URL}/assets/${jobId}/out/${f}`.replace(/\\/g, "/");
       
-      // Crude type inference
+      const isSvg = f.toLowerCase().endsWith(".svg");
+      const isMask = base.toLowerCase().endsWith("_mask");
+
+      // Deterministic type inference based on layer naming contract
+      // NOTE: meta.json is allowed to contain multiple plates per logical layer.
+      // The frontend will deterministically stack/merge by side+type+depthIndex.
       let type: any = "UNKNOWN";
-      if (base.endsWith("_mask")) {
-        if (base.includes("_spot_uv_")) type = "SPOT_UV_MASK";
-        else if (base.includes("_emboss_") || base.endsWith("_emboss_mask")) type = "EMBOSS";
-        else if (base.includes("_foil_")) type = "FOIL_MASK";
-        else if (base.includes("_laser_cut") || base.includes("_die_cut")) type = "DIECUT";
+      const lowerBase = base.toLowerCase();
+
+      if (isSvg) {
+        // SVGs are currently only produced for die-cut layers
+        if (lowerBase.endsWith("_laser_cut") || lowerBase.endsWith("_die_cut")) {
+          type = "DIECUT_SVG";
+        }
+      } else if (isMask) {
+        if (lowerBase.includes("_spot_uv_") || lowerBase.endsWith("_spot_uv_mask")) type = "SPOT_UV_MASK";
+        else if (lowerBase.includes("_emboss_") || lowerBase.includes("_deboss_") || lowerBase.endsWith("_emboss_mask") || lowerBase.endsWith("_deboss_mask")) type = "EMBOSS";
+        else if (lowerBase.includes("_foil_")) type = "FOIL_MASK";
+        else if (lowerBase.includes("_laser_cut") || lowerBase.includes("_die_cut")) type = "DIECUT_MASK";
       } else {
-        type = "PRINT";
+        // Non-mask PNG exports should only be print layers
+        if (lowerBase.endsWith("_print") || lowerBase.endsWith("_back_print")) {
+          type = "PRINT";
+        }
       }
       
-      // Infer side from filename (front/back)
-      let side: "front" | "back" = "front";
-      const lowerBase = base.toLowerCase();
-      if (lowerBase.includes("_back_") || lowerBase.startsWith("back_")) {
-        side = "back";
-      } else if (lowerBase.includes("_front_") || lowerBase.startsWith("front_")) {
-        side = "front";
-      }
+      // Infer side + depthIndex from layer name
+      const side = inferSideFromLayerName(base);
+      const depthIndex = parseDepthIndexFromLayerName(base);
       
       // Build assets object
-      const isSvg = f.toLowerCase().endsWith(".svg");
       const assets: any = {};
       if (isSvg) {
         assets.svg = url;
       } else {
         // For masks, use maskPng; for emboss height, use heightPng; otherwise png
-        if (type === "EMBOSS" && base.includes("height")) {
+        if (type === "EMBOSS" && lowerBase.includes("height")) {
           assets.heightPng = url;
         } else if (type !== "PRINT") {
           assets.maskPng = url;
@@ -63,7 +86,7 @@ export async function verifyOutputsAndBuildMeta(jobId: string, outDir: string) {
         id: base,
         aiLayerName: base, // Use base filename as layer name
         side,
-        depthIndex: 0, // Default to 0, should be extracted from Illustrator export
+        depthIndex,
         physicalPlyIndex: 0, // Default to 0, should be extracted from Illustrator export
         face: side, // Same as side
         type,

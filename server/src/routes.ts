@@ -8,10 +8,27 @@ import { createJob, getJob } from "./jobs.js";
 
 export const router = express.Router();
 
+// Health check endpoint (no auth required)
+router.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    service: "silkcards-parser",
+    version: "1.0.0"
+  });
+});
+
 router.use((req, res, next) => {
-  if (req.path.startsWith("/assets/")) return next();
+  if (req.path.startsWith("/assets/") || req.path === "/health") return next();
+  // If API_KEY is not configured, allow all requests (development mode)
+  if (!API_KEY || API_KEY === "" || API_KEY === "REPLACE_WITH_STRONG_KEY") {
+    return next();
+  }
+  // If API_KEY is configured, require it in header
   const key = req.header("x-api-key");
-  if (!API_KEY || key !== API_KEY) return res.status(401).json({ error: "Unauthorized" });
+  if (key !== API_KEY) {
+    return res.status(401).json({ error: "Unauthorized: Invalid or missing API key" });
+  }
   next();
 });
 

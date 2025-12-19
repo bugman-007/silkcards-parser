@@ -6,6 +6,11 @@
   }
   var outDir = __PARSER_ARGS__.outDir;
 
+  // Allow override from caller (recommended)
+  // If not provided, default to higher-res than before.
+  var TARGET_WIDTH_PX  = (__PARSER_ARGS__.targetWidthPx  != null) ? __PARSER_ARGS__.targetWidthPx  : 4096;
+  var TARGET_HEIGHT_PX = (__PARSER_ARGS__.targetHeightPx != null) ? __PARSER_ARGS__.targetHeightPx : 8192;
+
   var doc = app.activeDocument;
 
   function ensureFolder(p) {
@@ -22,42 +27,61 @@
   }
 
   /**
-   * Export PNG at high resolution
+   * Export PNG at high resolution based on ARTBOARD size (not artwork bounds).
+   * This is critical: otherwise Illustrator may export cropped small images.
    * @param {string} name - Output filename (without extension)
-   * @param {number} targetWidthPx - Target pixel width (e.g., 2048)
-   * @param {number} targetHeightPx - Target pixel height (e.g., 4096)
+   * @param {number} targetWidthPx - Target pixel width (e.g., 4096)
+   * @param {number} targetHeightPx - Target pixel height (e.g., 8192)
    */
   function exportPNG(name, targetWidthPx, targetHeightPx) {
+    // Always export using artboard 0 (your pipeline assumes one card artboard)
+    doc.artboards.setActiveArtboardIndex(0);
+
     var file = new File(outDir + "/" + name + ".png");
-    
-    // Get artboard dimensions in points (72 points = 1 inch)
+
+    // Get artboard dimensions in points (1 pt = 1 px at 72 DPI)
     var artboard = doc.artboards[0];
-    var artboardWidthPt = artboard.artboardRect[2] - artboard.artboardRect[0];
-    var artboardHeightPt = artboard.artboardRect[1] - artboard.artboardRect[3];
-    // artboardRect is [left, top, right, bottom], so height = top - bottom (top > bottom)
-    artboardHeightPt = Math.abs(artboardHeightPt);
-    
-    // Calculate scale factors to achieve target pixel dimensions
-    // PNG export: outputPixels = artboardPoints * (scale / 100)
-    // Therefore: scale = (targetPixels / artboardPoints) * 100
-    var horizontalScale = (targetWidthPx / artboardWidthPt) * 100.0;
-    var verticalScale = (targetHeightPx / artboardHeightPt) * 100.0;
-    
-    // Set raster effects resolution to match target resolution
-    // This ensures any rasterized content (effects, placed images) is high-res
-    var targetDPI = Math.max(
-      (targetWidthPx / artboardWidthPt) * 72,
-      (targetHeightPx / artboardHeightPt) * 72
-    );
+    var r = artboard.artboardRect; // [left, top, right, bottom]
+    var artboardWidthPt  = Math.abs(r[2] - r[0]);
+    var artboardHeightPt = Math.abs(r[1] - r[3]);
+
+    // Compute scale to reach requested pixels.
+    // IMPORTANT: use uniform scale to avoid stretching if aspect differs slightly.
+    var hScale = (targetWidthPx  / artboardWidthPt)  * 100.0;
+    var vScale = (targetHeightPx / artboardHeightPt) * 100.0;
+    var scale = Math.max(hScale, vScale);
+
+    // Save & temporarily raise raster effects resolution (for effects like blur, etc.)
+    var prevDPI = doc.rasterEffectSettings.resolution;
+
+    // Convert target pixels to effective DPI for the artboard size.
+    // DPI = (pixels / points) * 72
+    var dpiFromW = (targetWidthPx  / artboardWidthPt)  * 72.0;
+    var dpiFromH = (targetHeightPx / artboardHeightPt) * 72.0;
+    var targetDPI = Math.max(dpiFromW, dpiFromH);
+
+    // Cap DPI to avoid Illustrator instability on some files
+    if (targetDPI > 1200) targetDPI = 1200;
+
     doc.rasterEffectSettings.resolution = targetDPI;
-    
+
     var opts = new ExportOptionsPNG24();
     opts.antiAliasing = true;
     opts.transparency = true;
-    opts.horizontalScale = horizontalScale;
-    opts.verticalScale = verticalScale;
-    
+
+    // CRITICAL FIX:
+    // Export full artboard region. Without this, Illustrator may export only the
+    // visible artwork bounds (which can be ~100x200 px).
+    opts.artBoardClipping = true;
+
+    // Apply uniform scale
+    opts.horizontalScale = scale;
+    opts.verticalScale = scale;
+
     doc.exportFile(file, ExportType.PNG24, opts);
+
+    // Restore original DPI
+    doc.rasterEffectSettings.resolution = prevDPI;
   }
 
   function exportSVG(name) {
@@ -73,12 +97,6 @@
     for (var i = 0; i < doc.layers.length; i++) doc.layers[i].visible = false;
     layer.visible = true;
   }
-
-  // High-resolution export: 2048x4096 pixels (portrait orientation)
-  // All layers use identical dimensions for consistent quality
-  // Minimum: 1024x2048, Preferred: 2048x4096
-  var TARGET_WIDTH_PX = 2048;
-  var TARGET_HEIGHT_PX = 4096;
 
   // Export by naming convention
   for (var i = 0; i < doc.layers.length; i++) {

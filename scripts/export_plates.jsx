@@ -11,6 +11,92 @@
   var doc = app.activeDocument;
 
   // =========================
+  // JSON fallback (ExtendScript-safe)
+  // =========================
+  function _isArray(v) {
+    return v && typeof v === "object" && v.constructor === Array;
+  }
+
+  function _escapeString(s) {
+    // Minimal JSON escaping
+    return s
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\r/g, "\\r")
+      .replace(/\n/g, "\\n")
+      .replace(/\t/g, "\\t");
+  }
+
+  function _stringifyValue(v, indent, level) {
+    if (v === null) return "null";
+
+    var t = typeof v;
+    if (t === "number") {
+      if (!isFinite(v)) return "null";
+      return String(v);
+    }
+    if (t === "boolean") return v ? "true" : "false";
+    if (t === "string") return '"' + _escapeString(v) + '"';
+
+    if (t === "object") {
+      var pad = "";
+      var padNext = "";
+      if (indent) {
+        for (var i = 0; i < level * indent.length; i++) pad += indent.charAt(0);
+        for (var j = 0; j < (level + 1) * indent.length; j++) padNext += indent.charAt(0);
+      }
+
+      if (_isArray(v)) {
+        if (v.length === 0) return "[]";
+        var partsA = [];
+        for (var a = 0; a < v.length; a++) {
+          var av = _stringifyValue(v[a], indent, level + 1);
+          partsA.push(indent ? (padNext + av) : av);
+        }
+        if (indent) {
+          return "[\n" + partsA.join(",\n") + "\n" + pad + "]";
+        }
+        return "[" + partsA.join(",") + "]";
+      }
+
+      // object
+      var keys = [];
+      for (var k in v) {
+        if (v.hasOwnProperty(k)) keys.push(k);
+      }
+      if (keys.length === 0) return "{}";
+
+      var partsO = [];
+      for (var o = 0; o < keys.length; o++) {
+        var key = keys[o];
+        var val = _stringifyValue(v[key], indent, level + 1);
+        if (indent) {
+          partsO.push(padNext + '"' + _escapeString(key) + '": ' + val);
+        } else {
+          partsO.push('"' + _escapeString(key) + '":' + val);
+        }
+      }
+      if (indent) {
+        return "{\n" + partsO.join(",\n") + "\n" + pad + "}";
+      }
+      return "{" + partsO.join(",") + "}";
+    }
+
+    // undefined / function
+    return "null";
+  }
+
+  function stringify(obj, pretty) {
+    // Use native JSON if available, else fallback
+    try {
+      if (typeof JSON !== "undefined" && JSON && JSON.stringify) {
+        return JSON.stringify(obj, null, pretty ? 2 : 0);
+      }
+    } catch (e) {}
+    return _stringifyValue(obj, pretty ? "  " : "", 0);
+  }
+
+  // =========================
   // FS helpers
   // =========================
   function ensureFolder(p) {
@@ -276,11 +362,13 @@
   // =========================
   try {
     for (var key in groups) {
+      if (!groups.hasOwnProperty(key)) continue;
+
       var g = groups[key];
       var cardRectPt = findCardRectPt(g);
 
-      for (var i = 0; i < g.layers.length; i++) {
-        var layer = g.layers[i];
+      for (var li = 0; li < g.layers.length; li++) {
+        var layer = g.layers[li];
         var type = classifyType(layer.name);
         if (!type) continue;
 
@@ -319,7 +407,7 @@
   var metaFile = new File(outDir + "/meta.json");
   metaFile.encoding = "UTF-8";
   metaFile.open("w");
-  metaFile.write(JSON.stringify(meta, null, 2));
+  metaFile.write(stringify(meta, true)); // ✅ no JSON dependency
   metaFile.close();
 
 })();

@@ -76,6 +76,31 @@ router.get("/parse/:jobId", (req, res) => {
   // If done, also return meta.json content (if exists)
   if (job.status === "done" && job.metaPath && fs.existsSync(job.metaPath)) {
     const meta = JSON.parse(fs.readFileSync(job.metaPath, "utf-8"));
+    const host = req.get("host");
+    const origin = host ? `${req.protocol}://${host}` : "";
+    const rewriteUrl = (value: unknown) => {
+      if (typeof value !== "string") return value;
+      if (!value.startsWith("/")) return value;
+      return origin ? `${origin}${value}` : value;
+    };
+
+    if (meta && Array.isArray(meta.plates)) {
+      meta.plates = meta.plates.map((plate: any) => {
+        const updated = { ...plate };
+        if (updated.file) {
+          updated.file = rewriteUrl(updated.file);
+        }
+        if (updated.assets && typeof updated.assets === "object") {
+          const assets: Record<string, unknown> = { ...updated.assets };
+          for (const key of Object.keys(assets)) {
+            assets[key] = rewriteUrl(assets[key]);
+          }
+          updated.assets = assets;
+        }
+        return updated;
+      });
+    }
+
     return res.json({ ...job, payload: meta });
   }
   res.json(job);

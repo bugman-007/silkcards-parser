@@ -7,6 +7,7 @@ import { router } from "./routes.js";
 fs.mkdirSync(JOBS_ROOT, { recursive: true });
 
 const app = express();
+app.set("trust proxy", true);
 
 // CORS middleware (before helmet to allow cross-origin requests)
 app.use((req, res, next) => {

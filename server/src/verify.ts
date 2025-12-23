@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { BASE_URL } from "./config.js";
 
 function listFiles(dir: string) {
   return fs.readdirSync(dir).filter(f => fs.statSync(path.join(dir, f)).isFile());
@@ -35,7 +34,7 @@ export async function verifyOutputsAndBuildMeta(jobId: string, outDir: string) {
     card: { plyCount: 1, thicknessPt: 16, size: { widthMm: 88.9, heightMm: 50.8, bleedMm: 3, safeMm: 3 }, dpi: 600 },
     plates: files.map((f) => {
       const base = f.replace(/\.(png|svg)$/i, "");
-      const url = `${BASE_URL}/assets/${jobId}/out/${f}`.replace(/\\/g, "/");
+      const url = `/assets/${jobId}/out/${f}`.replace(/\\/g, "/");
       
       const isSvg = f.toLowerCase().endsWith(".svg");
       const isMask = base.toLowerCase().endsWith("_mask");

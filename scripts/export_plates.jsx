@@ -200,6 +200,8 @@
 
   function collectLayerContentBounds(layer, cardW, cardH) {
     var bounds = null;
+  
+    // Current layer items
     walkPageItems(layer, function (it) {
       try { if (it.hidden) return; } catch (e0) {}
       var b = getBounds(it);
@@ -207,8 +209,17 @@
       if (isLikelyFrameItem(it, b, cardW, cardH)) return;
       bounds = unionBounds(bounds, b);
     });
+  
+    // IMPORTANT: include nested sublayers too (many AI files keep masks inside sublayers)
+    try {
+      for (var j = 0; j < layer.layers.length; j++) {
+        var child = collectLayerContentBounds(layer.layers[j], cardW, cardH);
+        if (child) bounds = unionBounds(bounds, child);
+      }
+    } catch (e1) {}
+  
     return bounds;
-  }
+  }  
 
   // =========================
   // Units
@@ -370,21 +381,29 @@
   function findLayerCardRect(layer, cardW, cardH) {
     var best = null;
     var bestScore = 1e18;
-
-    walkPageItems(layer, function (it) {
-      var b = getBounds(it);
-      if (!b) return;
-      var w = rectW(b), h = rectH(b);
-      if (!approx(w, cardW, 0.03) || !approx(h, cardH, 0.03)) return;
-      var score = Math.abs(w - cardW) + Math.abs(h - cardH);
-      if (score < bestScore) { bestScore = score; best = b; }
-    });
-
-    if (best) return best;
-
-    var lb = collectLayerBounds(layer);
-    return lb ? lb : doc.artboards[0].artboardRect;
-  }
+  
+    function scanLayer(lay) {
+      // scan items in this layer (and group items)
+      walkPageItems(lay, function (it) {
+        var b = getBounds(it);
+        if (!b) return;
+        var w = rectW(b), h = rectH(b);
+        if (!approx(w, cardW, 0.03) || !approx(h, cardH, 0.03)) return;
+        var score = Math.abs(w - cardW) + Math.abs(h - cardH);
+        if (score < bestScore) { bestScore = score; best = b; }
+      });
+  
+      // IMPORTANT: scan nested sublayers too
+      try {
+        for (var j = 0; j < lay.layers.length; j++) scanLayer(lay.layers[j]);
+      } catch (e) {}
+    }
+  
+    scanLayer(layer);
+  
+    // If we didn't find a real "card rect", return null so caller can keep artboard rect.
+    return best;
+  }  
 
   // =========================
   // Meta
@@ -411,72 +430,117 @@
   }
 
   // =========================
-  // MAIN EXPORT
-  // =========================
-  try {
-    for (var prefix in groups) {
-      if (!groups.hasOwnProperty(prefix)) continue;
+// MAIN EXPORT
+// =========================
+try {
+  for (var prefix in groups) {
+    if (!groups.hasOwnProperty(prefix)) continue;
 
-      var g = groups[prefix];
-      var cardSize = computeGroupCardSize(g);
+    var g = groups[prefix];
+    var cardSize = computeGroupCardSize(g);
 
-      for (var k = 0; k < g.layers.length; k++) {
-        var layer = g.layers[k];
-        var type = classifyType(layer.name);
-        if (!type) continue;
+    // ---------------------------------------------------------
+    // FIX: Determine the cardRect ONCE per group (from a layer
+    // that actually contains the full card frame), then reuse it
+    // for all plates in this group.
+    // ---------------------------------------------------------
+    var refLayer = null;
 
-        soloLayer(layer);
-
-        var layerBounds = collectLayerBounds(layer);
-        if (!layerBounds) continue; // truly empty layer
-
-        // Determine the cardRect for THIS plate (supports tiled layouts)
-        var cardRectPt = findLayerCardRect(layer, cardSize.w, cardSize.h);
-
-        // Decide export rect
-        var exportRectPt = null;
-        var outName = null;
-
-        if (type === "PRINT") {
-          // Always export the full card rect for print
-          exportRectPt = cardRectPt;
-          outName = layer.name;
-        } else {
-          // Effects: crop to actual content within the card
-          var contentBounds = collectLayerContentBounds(layer, rectW(cardRectPt), rectH(cardRectPt));
-
-          // Hard fallback: if content detection fails, export full card (never “empty”)
-          if (!contentBounds) contentBounds = cardRectPt;
-
-          // Prefer intersection with cardRect, but if it's a tiled plate and math fails, export content bounds
-          var clipped = intersectBounds(contentBounds, cardRectPt);
-          exportRectPt = clipped ? clipped : contentBounds;
-
-          outName = layer.name + "_mask";
-        }
-
-        // Export
-        var info = exportPNGClipped(outName, exportRectPt);
-
-        // Meta
-        pushMeta(g, type, outName, cardRectPt, exportRectPt, info.dpiUsed, info.wPx, info.hPx);
-
-        // Diecut also exports SVG
-        if (type === "DIECUT") {
-          exportSVG(layer.name);
-        }
+    // Prefer DIECUT as reference (most reliable full card bounds)
+    for (var rk0 = 0; rk0 < g.layers.length; rk0++) {
+      if (/_laser_cut$|_die_cut$/i.test(g.layers[rk0].name)) { refLayer = g.layers[rk0]; break; }
+    }
+    // Else prefer PRINT (usually full card)
+    if (!refLayer) {
+      for (var rk1 = 0; rk1 < g.layers.length; rk1++) {
+        if (/_print$|_back_print$/i.test(g.layers[rk1].name)) { refLayer = g.layers[rk1]; break; }
+      }
+    }
+    // Else fallback: first layer with any bounds
+    if (!refLayer) {
+      for (var rk2 = 0; rk2 < g.layers.length; rk2++) {
+        var bb0 = collectLayerBounds(g.layers[rk2]);
+        if (bb0) { refLayer = g.layers[rk2]; break; }
       }
     }
 
-    // Write meta.json
-    var metaFile = new File(outDir + "/meta.json");
-    metaFile.encoding = "UTF-8";
-    metaFile.open("w");
-    metaFile.write(stringify(meta, true));
-    metaFile.close();
+    // As a last resort, use artboard
+    var groupCardRectPt = doc.artboards[0].artboardRect;
 
-  } finally {
-    cleanupTempArtboard();
+    if (refLayer) {
+      // Make sure the reference layer is visible so bounds detection is stable
+      soloLayer(refLayer);
+
+      var refBounds = collectLayerBounds(refLayer);
+      if (refBounds) {
+        // Find the card rect in the reference layer using the group's card size heuristic
+        var foundCardRect = findLayerCardRect(refLayer, cardSize.w, cardSize.h);
+
+        // IMPORTANT: only override if we truly found a card rect;
+        // otherwise KEEP the artboard rect (never shrink to content bounds)
+        if (foundCardRect) groupCardRectPt = foundCardRect;
+      }
+    }
+
+    // Now export each plate in the group using the SAME card rect
+    for (var k = 0; k < g.layers.length; k++) {
+      var layer = g.layers[k];
+      var type = classifyType(layer.name);
+      if (!type) continue;
+
+      soloLayer(layer);
+
+      var layerBounds = collectLayerBounds(layer);
+      if (!layerBounds) continue; // truly empty layer
+
+      // IMPORTANT: Use the group card rect, not per-layer rect
+      var cardRectPt = groupCardRectPt;
+
+      // Decide export rect
+      var exportRectPt = null;
+      var outName = null;
+
+      if (type === "PRINT") {
+        // Always export the full card rect for print
+        exportRectPt = cardRectPt;
+        outName = layer.name;
+      } else {
+        // Effects: crop to actual content within the card, but keep placement via rectPx
+        var contentBounds = collectLayerContentBounds(layer, rectW(cardRectPt), rectH(cardRectPt));
+
+        // Hard fallback: if content detection fails, export full card (never “empty”)
+        if (!contentBounds) contentBounds = cardRectPt;
+
+        // Prefer intersection with cardRect
+        var clipped = intersectBounds(contentBounds, cardRectPt);
+        exportRectPt = clipped ? clipped : contentBounds;
+
+        outName = layer.name + "_mask";
+      }
+
+      // Export
+      var info = exportPNGClipped(outName, exportRectPt);
+
+      // Meta (rectPx now correctly references the REAL card rect)
+      pushMeta(g, type, outName, cardRectPt, exportRectPt, info.dpiUsed, info.wPx, info.hPx);
+
+      // Diecut also exports SVG
+      if (type === "DIECUT") {
+        exportSVG(layer.name);
+      }
+    }
   }
+
+  // Write meta.json
+  var metaFile = new File(outDir + "/meta.json");
+  metaFile.encoding = "UTF-8";
+  metaFile.open("w");
+  metaFile.write(stringify(meta, true));
+  metaFile.close();
+
+} finally {
+  cleanupTempArtboard();
+}
+
 
 })();

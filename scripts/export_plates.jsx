@@ -337,6 +337,71 @@
     doc.exportFile(file, ExportType.SVG, opts);
   }
 
+  function safeMenuCommand(cmd) {
+    try {
+      app.executeMenuCommand(cmd);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function applyWhiteFillToItem(item, white) {
+    if (!item) return;
+    if (item.typename === "GroupItem") {
+      for (var i = 0; i < item.pageItems.length; i++) {
+        applyWhiteFillToItem(item.pageItems[i], white);
+      }
+      return;
+    }
+    if (item.typename === "CompoundPathItem") {
+      for (var j = 0; j < item.pathItems.length; j++) {
+        applyWhiteFillToItem(item.pathItems[j], white);
+      }
+      return;
+    }
+    if (item.typename === "PathItem") {
+      try {
+        item.filled = true;
+        item.fillColor = white;
+        item.stroked = false;
+      } catch (e1) {}
+    }
+  }
+
+  function applyWhiteFillToSelection() {
+    if (!doc.selection || doc.selection.length === 0) return false;
+    var white = new RGBColor();
+    white.red = 255;
+    white.green = 255;
+    white.blue = 255;
+    for (var i = 0; i < doc.selection.length; i++) {
+      applyWhiteFillToItem(doc.selection[i], white);
+    }
+    return true;
+  }
+
+  function normalizeFinishLayer() {
+    safeMenuCommand("deselectall");
+    safeMenuCommand("selectall");
+    if (!doc.selection || doc.selection.length === 0) return false;
+
+    // Expand appearance, outline strokes, and unite into solid geometry.
+    safeMenuCommand("expandStyle");
+    safeMenuCommand("expand");
+    safeMenuCommand("outline");
+    safeMenuCommand("outlineStroke");
+
+    if (!safeMenuCommand("Live Pathfinder Unite")) {
+      safeMenuCommand("Live Pathfinder Add");
+    }
+    safeMenuCommand("expandStyle");
+    safeMenuCommand("expand");
+
+    applyWhiteFillToSelection();
+    return true;
+  }
+
   // =========================
   // Layer parsing
   // =========================
@@ -373,16 +438,23 @@
     var rect = null;
 
     for (var i = 0; i < group.layers.length; i++) {
-      if (/_laser_cut$|_die_cut$/.test(group.layers[i].name)) {
+      var name = String(group.layers[i].name).toLowerCase();
+      if (/_laser_cut$|_die_cut$/.test(name)) {
         rect = unionBounds(rect, collectLayerBounds(group.layers[i]));
       }
     }
     if (rect) return rect;
 
     for (var j = 0; j < group.layers.length; j++) {
-      if (/_print$|_back_print$/.test(group.layers[j].name)) {
+      var pname = String(group.layers[j].name).toLowerCase();
+      if (/_print$|_back_print$/.test(pname)) {
         rect = unionBounds(rect, collectLayerBounds(group.layers[j]));
       }
+    }
+    if (rect) return rect;
+
+    for (var k = 0; k < group.layers.length; k++) {
+      rect = unionBounds(rect, collectLayerBounds(group.layers[k]));
     }
     if (rect) return rect;
 
@@ -431,6 +503,12 @@
         if (!type) continue;
 
         soloLayer(layer);
+        try { app.redraw(); } catch (e0) {}
+
+        if (type === "FOIL" || type === "UV" || type === "EMBOSS") {
+          normalizeFinishLayer();
+          try { app.redraw(); } catch (e1) {}
+        }
 
         var layerBoundsPt = collectLayerBounds(layer);
         if (!layerBoundsPt) continue;

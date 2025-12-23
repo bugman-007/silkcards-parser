@@ -113,9 +113,20 @@
     doc.layers[i].visible = false;
   }
 
+  function forceLayerVisible(layer) {
+    try { layer.visible = true; } catch (e) {}
+    try { layer.locked = false; } catch (e2) {}
+    try { layer.printable = true; } catch (e3) {}
+    try {
+      for (var i = 0; i < layer.layers.length; i++) {
+        forceLayerVisible(layer.layers[i]);
+      }
+    } catch (e4) {}
+  }
+
   function soloLayer(layer) {
     for (var i = 0; i < doc.layers.length; i++) doc.layers[i].visible = false;
-    layer.visible = true;
+    forceLayerVisible(layer);
   }
 
   // =========================
@@ -151,16 +162,31 @@
     }
   }
 
+  function isValidBounds(b) {
+    return b && b.length === 4 &&
+      isFinite(b[0]) && isFinite(b[1]) && isFinite(b[2]) && isFinite(b[3]);
+  }
+
+  function getBounds(obj) {
+    var b = null;
+    try { b = obj.visibleBounds; } catch (e) {}
+    if (!isValidBounds(b)) {
+      try { b = obj.geometricBounds; } catch (e2) {}
+    }
+    return isValidBounds(b) ? b : null;
+  }
+
   function collectLayerBounds(layer) {
     var bounds = null;
+    var lb = getBounds(layer);
+    if (lb) bounds = unionBounds(bounds, lb);
 
     walkPageItems(layer, function (it) {
-      try {
-        var b = it.geometricBounds;
-        var w = Math.abs(b[2] - b[0]);
-        var h = Math.abs(b[1] - b[3]);
-        if (w > 0.5 && h > 0.5) bounds = unionBounds(bounds, b);
-      } catch (e) {}
+      var b = getBounds(it);
+      if (!b) return;
+      var w = Math.abs(b[2] - b[0]);
+      var h = Math.abs(b[1] - b[3]);
+      if (w > 0.01 && h > 0.01) bounds = unionBounds(bounds, b);
     });
 
     try {
@@ -286,17 +312,20 @@
   // Layer parsing
   // =========================
   function parsePrefix(name) {
-    var m = name.match(/^(front|back)_layer_(\d+)_/);
+    var n = String(name).replace(/^\s+|\s+$/g, "");
+    var m = n.match(/^(front|back)_layer_(\d+)_/i);
     if (!m) return null;
-    return { side: m[1], idx: parseInt(m[2], 10), prefix: m[1] + "_layer_" + m[2] };
+    var side = m[1].toLowerCase();
+    return { side: side, idx: parseInt(m[2], 10), prefix: side + "_layer_" + m[2] };
   }
 
   function classifyType(name) {
-    if (/_laser_cut$|_die_cut$/.test(name)) return "DIECUT";
-    if (/_spot_uv$/.test(name)) return "UV";
-    if (/_emboss$|_deboss$/.test(name)) return "EMBOSS";
-    if (/_foil_/.test(name)) return "FOIL";
-    if (/_print$|_back_print$/.test(name)) return "PRINT";
+    var n = String(name).replace(/^\s+|\s+$/g, "").toLowerCase();
+    if (/_laser_cut$|_die_cut$/.test(n)) return "DIECUT";
+    if (/_spot_uv$/.test(n)) return "UV";
+    if (/_emboss$|_deboss$/.test(n)) return "EMBOSS";
+    if (/_foil_/.test(n)) return "FOIL";
+    if (/_print$|_back_print$/.test(n)) return "PRINT";
     return null;
   }
 
@@ -385,7 +414,9 @@
           outName = layer.name;
         } else {
           exportRectPt = intersectBounds(layerBoundsPt, cardRectPt);
-          if (!exportRectPt) continue;
+          if (!exportRectPt) {
+            exportRectPt = cardRectPt;
+          }
           outName = layer.name + "_mask";
         }
 

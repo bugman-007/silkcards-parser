@@ -109,23 +109,46 @@
   // =========================
   // Visibility
   // =========================
+  function hideLayerRecursive(layer) {
+    try { layer.visible = false; } catch (e) {}
+    try {
+      for (var i = 0; i < layer.layers.length; i++) {
+        hideLayerRecursive(layer.layers[i]);
+      }
+    } catch (e2) {}
+  }
+
   for (var i = 0; i < doc.layers.length; i++) {
-    doc.layers[i].visible = false;
+    hideLayerRecursive(doc.layers[i]);
+  }
+
+  function unlockAndShowLayer(layer) {
+    try { layer.locked = false; } catch (e) {}
+    try { layer.template = false; } catch (e2) {}
+    try { layer.printable = true; } catch (e3) {}
+    try { layer.visible = true; } catch (e4) {}
+  }
+
+  function ensureLayerChainVisible(layer) {
+    var cur = layer;
+    while (cur && cur.typename === "Layer") {
+      unlockAndShowLayer(cur);
+      cur = cur.parent;
+    }
   }
 
   function forceLayerVisible(layer) {
-    try { layer.visible = true; } catch (e) {}
-    try { layer.locked = false; } catch (e2) {}
-    try { layer.printable = true; } catch (e3) {}
+    ensureLayerChainVisible(layer);
+    unlockAndShowLayer(layer);
     try {
       for (var i = 0; i < layer.layers.length; i++) {
         forceLayerVisible(layer.layers[i]);
       }
-    } catch (e4) {}
+    } catch (e) {}
   }
 
   function soloLayer(layer) {
-    for (var i = 0; i < doc.layers.length; i++) doc.layers[i].visible = false;
+    for (var i = 0; i < doc.layers.length; i++) hideLayerRecursive(doc.layers[i]);
     forceLayerVisible(layer);
   }
 
@@ -167,26 +190,32 @@
       isFinite(b[0]) && isFinite(b[1]) && isFinite(b[2]) && isFinite(b[3]);
   }
 
+  function hasNonZeroBounds(b) {
+    var w = Math.abs(b[2] - b[0]);
+    var h = Math.abs(b[1] - b[3]);
+    return w > 0.01 || h > 0.01;
+  }
+
   function getBounds(obj) {
     var b = null;
-    try { b = obj.visibleBounds; } catch (e) {}
-    if (!isValidBounds(b)) {
-      try { b = obj.geometricBounds; } catch (e2) {}
+    try { b = obj.geometricBounds; } catch (e) {}
+    if (!isValidBounds(b) || !hasNonZeroBounds(b)) {
+      try { b = obj.visibleBounds; } catch (e2) {}
     }
-    return isValidBounds(b) ? b : null;
+    if (!isValidBounds(b) || !hasNonZeroBounds(b)) return null;
+    return b;
   }
 
   function collectLayerBounds(layer) {
     var bounds = null;
-    var lb = getBounds(layer);
-    if (lb) bounds = unionBounds(bounds, lb);
 
     walkPageItems(layer, function (it) {
+      try {
+        if (it.hidden) return;
+      } catch (e0) {}
       var b = getBounds(it);
       if (!b) return;
-      var w = Math.abs(b[2] - b[0]);
-      var h = Math.abs(b[1] - b[3]);
-      if (w > 0.01 && h > 0.01) bounds = unionBounds(bounds, b);
+      bounds = unionBounds(bounds, b);
     });
 
     try {

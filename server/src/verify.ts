@@ -111,6 +111,13 @@ export async function verifyOutputsAndBuildMeta(jobId: string, outDir: string): 
   const aiMeta = readJsonIfExists(aiMetaPath);
   const placementById = extractPlacementMap(aiMeta);
 
+  // Extract layer information from AI meta if available
+  const aiLayerCount = aiMeta?.globalLayerStats?.totalLayerCount;
+  const aiMaxLayerIndex = aiMeta?.globalLayerStats?.maxLayerIndex;
+  const aiCards = aiMeta?.cards || [];
+  const aiBaseThicknessPt = aiMeta?.globalLayerStats?.baseThicknessPt || 16;
+  const aiBaseThicknessMm = aiMeta?.globalLayerStats?.baseThicknessMm || 0.4064; // 16pt in mm
+
   // Only accept real output files as plates.
   // IMPORTANT: exclude meta.json (and any json) from scanning.
   const files = listFiles(outDir).filter((f) => {
@@ -122,6 +129,20 @@ export async function verifyOutputsAndBuildMeta(jobId: string, outDir: string): 
   if (files.length === 0) {
     throw new Error("No output files found in outDir");
   }
+  
+  // Calculate layer count from files if not in AI meta
+  const layerIndices = new Set<number>();
+  files.forEach((f) => {
+    const base = f.replace(/\.(png|svg)$/i, "");
+    const depthIdx = parseDepthIndexFromLayerName(base);
+    layerIndices.add(depthIdx);
+  });
+  const calculatedMaxLayerIndex = layerIndices.size > 0 ? Math.max(...Array.from(layerIndices)) : -1;
+  const calculatedLayerCount = calculatedMaxLayerIndex + 1;
+  
+  // Use AI meta if available, otherwise calculate from files
+  const totalLayerCount = aiLayerCount || calculatedLayerCount;
+  const maxLayerIndex = aiMaxLayerIndex !== undefined ? aiMaxLayerIndex : calculatedMaxLayerIndex;
 
   const plates = files.map((f) => {
     const ext = path.extname(f).toLowerCase(); // .png | .svg
@@ -156,8 +177,9 @@ export async function verifyOutputsAndBuildMeta(jobId: string, outDir: string): 
     const plate: any = {
       id: base,
       side,
-      depthIndex,
-      physicalPlyIndex: 0,
+      depthIndex, // layerIndex: which physical layer (0, 1, 2, ...)
+      physicalPlyIndex: 0, // For future use: physical ply in multi-ply construction
+      cardLayerCount: totalLayerCount, // Total number of layers for this card
       face: side, // keep existing behavior
       type,
       assets,
@@ -171,10 +193,44 @@ export async function verifyOutputsAndBuildMeta(jobId: string, outDir: string): 
       if (placement.endPx) plate.endPx = placement.endPx;
       if (placement.rectPx) plate.rectPx = placement.rectPx;
       if (placement.sizePx) plate.sizePx = placement.sizePx;
+      // Include layer info from placement if available
+      if (placement.cardLayerCount != null) plate.cardLayerCount = placement.cardLayerCount;
+      if (placement.layerIndex != null) plate.depthIndex = placement.layerIndex;
     }
 
     return plate;
   });
+
+  // Calculate total card thickness based on layer count
+  // Industry standard: 16pt (0.4064mm) per layer
+  const baseThicknessPt = aiBaseThicknessPt;
+  const baseThicknessMm = aiBaseThicknessMm;
+  const totalThicknessPt = baseThicknessPt * totalLayerCount;
+  const totalThicknessMm = baseThicknessMm * totalLayerCount;
+
+  // Validation warnings
+  const warnings: string[] = [];
+  const errors: string[] = [];
+  
+  // Validate layer count consistency
+  if (totalLayerCount === 0) {
+    errors.push("No layers detected in design file");
+  } else if (totalLayerCount > 3) {
+    warnings.push(`Unusually high layer count (${totalLayerCount}). Most cards have 1-3 layers.`);
+  }
+  
+  // Check for missing layer indices (e.g., layer_0 and layer_2 but no layer_1)
+  const sortedIndices = Array.from(layerIndices).sort((a, b) => a - b);
+  for (let i = 0; i < sortedIndices.length - 1; i++) {
+    if (sortedIndices[i + 1] - sortedIndices[i] > 1) {
+      warnings.push(`Gap in layer indices detected: found layer_${sortedIndices[i]} and layer_${sortedIndices[i + 1]} but missing intermediate layers`);
+    }
+  }
+  
+  // Validate thickness calculation
+  if (totalThicknessMm < 0.3 || totalThicknessMm > 3.0) {
+    warnings.push(`Calculated card thickness (${totalThicknessMm.toFixed(2)}mm) seems unusual. Typical range: 0.5-2.0mm`);
+  }
 
   // Build the service meta payload (v1 schema) but with merged placement fields.
   const payload: any = {
@@ -182,7 +238,22 @@ export async function verifyOutputsAndBuildMeta(jobId: string, outDir: string): 
     jobId,
     generatedAt: new Date().toISOString(),
     plates,
-    validation: { passed: true, warnings: [], errors: [] },
+    // Layer information
+    layerInfo: {
+      totalLayerCount,
+      maxLayerIndex,
+      baseThicknessPt,
+      baseThicknessMm,
+      totalThicknessPt,
+      totalThicknessMm,
+    },
+    // Card-level information (if available from AI meta)
+    cards: aiCards.length > 0 ? aiCards : undefined,
+    validation: { 
+      passed: errors.length === 0, 
+      warnings, 
+      errors 
+    },
   };
 
   // Overwrite meta.json with the merged payload (single meta.json output)

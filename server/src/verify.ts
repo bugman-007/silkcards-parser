@@ -185,12 +185,6 @@ export async function verifyOutputsAndBuildMeta(jobId: string, outDir: string): 
     validation: { passed: true, warnings: [], errors: [] },
   };
 
-  // Preserve card ply metadata if Illustrator provided it
-  if (aiMeta && typeof aiMeta === "object") {
-    if (aiMeta.card) payload.card = aiMeta.card;
-    if (Array.isArray(aiMeta.plies)) payload.plies = aiMeta.plies;
-  }
-
   // Overwrite meta.json with the merged payload (single meta.json output)
   const metaPath = path.join(outDir, "meta.json");
   fs.writeFileSync(metaPath, JSON.stringify(payload, null, 2), "utf-8");

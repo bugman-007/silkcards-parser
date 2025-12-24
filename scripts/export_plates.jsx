@@ -609,51 +609,7 @@
     };
   }
 
-  // =========================
-  // Ply (card layer) metadata
-  // layerIndex in layer names (layer_0, layer_1, ...) represents physical ply index.
-  // This is needed for renderer thickness + per-ply effect routing.
-  // =========================
-  var plyIndexList = [];
-  for (var pk in cards) {
-    if (!cards.hasOwnProperty(pk)) continue;
-    var n = parseInt(pk, 10);
-    if (isFinite(n)) plyIndexList.push(n);
-  }
-  plyIndexList.sort(function (a, b) {
-    return a - b;
-  });
-
-  var plyMetaList = [];
-  for (var pi = 0; pi < plyIndexList.length; pi++) {
-    var plyIdx = plyIndexList[pi];
-    var key = String(plyIdx);
-
-    var cardInfoPly = cardByIndex[key];
-    var cardObj = cards[key];
-
-    // cardByIndex should exist for any cards[] entry; guard anyway.
-    if (!cardInfoPly || !cardObj) continue;
-
-    var dpiPly = cardInfoPly.dpiUsed;
-
-    // Use front rect as reference for pixel dimensions; front/back are constructed same W/H.
-    var refRectPt = cardInfoPly.rectBySide.front || cardInfoPly.rectBySide.back;
-    var cardWpxPly = Math.round(ptsToPx(rectW(refRectPt), dpiPly));
-    var cardHpxPly = Math.round(ptsToPx(rectH(refRectPt), dpiPly));
-
-    plyMetaList.push({
-      plyIndex: plyIdx,
-      dpiUsed: dpiPly,
-      cardPx: { w: cardWpxPly, h: cardHpxPly },
-      facesPresent: {
-        front: !!cardObj.sides.front,
-        back: !!cardObj.sides.back,
-      },
-    });
-  }
-
-  // Compute a "typical" card size for the group, without using union across tiles
+  // Compute a “typical” card size for the group, without using union across tiles
   function computeGroupCardSize(group) {
     // Prefer DIECUT if present
     for (var i = 0; i < group.layers.length; i++) {
@@ -720,19 +676,6 @@
   var meta = { version: 2, dpi: DPI, maxPx: MAX_PX, plates: [] };
   var placementById = {};
 
-  // Card / ply summary for renderer thickness + per-ply routing
-  meta.card = {
-    plyCount: plyIndexList.length,
-    plyIndices: plyIndexList.slice(0),
-
-    // Unitless thickness model (frontend can map to mm based on product/material)
-    thicknessUnits: {
-      unitsPerPly: 1,
-      totalUnits: plyIndexList.length,
-    },
-  };
-  meta.plies = plyMetaList;
-
   function pushMeta(
     group,
     type,
@@ -759,8 +702,6 @@
       id: outName,
       side: group.side,
       layerIndex: group.idx,
-      // ply index (alias of layerIndex) - used by frontend thickness + routing
-      plyIndex: group.idx,
       type: type,
       file: outName + ".png",
 

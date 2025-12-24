@@ -442,50 +442,14 @@
   // =========================
 
   // Build cards map by index: cards[idx] = { idx, sides: {front: group?, back: group?} }
-  // Note: idx here is the layer index (0, 1, 2, ...), not card index
-  // We need to find all unique layer indices to determine total layer count
   var cards = {};
-  var allLayerIndices = []; // Track all unique layer indices across all cards
-  
   for (var gp in groups) {
     if (!groups.hasOwnProperty(gp)) continue;
     var g0 = groups[gp];
-    var idx0 = g0.idx; // This is the layer index (0, 1, 2, ...)
-    
-    // Track unique layer indices
-    var found = false;
-    for (var i = 0; i < allLayerIndices.length; i++) {
-      if (allLayerIndices[i] === idx0) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) allLayerIndices.push(idx0);
-    
-    if (!cards[idx0]) {
-      cards[idx0] = { 
-        idx: idx0, 
-        sides: { front: null, back: null }
-      };
-    }
+    var idx0 = g0.idx;
+    if (!cards[idx0])
+      cards[idx0] = { idx: idx0, sides: { front: null, back: null } };
     cards[idx0].sides[g0.side] = g0;
-  }
-  
-  // Calculate total layer count: max layer index + 1
-  // Industry standard: layer_0 = 1 layer, layer_0+layer_1 = 2 layers, layer_0+layer_1+layer_2 = 3 layers
-  var maxLayerIndex = -1;
-  for (var i = 0; i < allLayerIndices.length; i++) {
-    if (allLayerIndices[i] > maxLayerIndex) {
-      maxLayerIndex = allLayerIndices[i];
-    }
-  }
-  var totalLayerCount = maxLayerIndex + 1; // layer_0 = 1, layer_0+layer_1 = 2, etc.
-  
-  // Store layer count info in each card entry (they all share the same layer structure)
-  for (var cardIdx in cards) {
-    if (!cards.hasOwnProperty(cardIdx)) continue;
-    cards[cardIdx].layerCount = totalLayerCount;
-    cards[cardIdx].maxLayerIndex = maxLayerIndex;
   }
 
   function getLayerBoundsVisible(layer) {
@@ -709,35 +673,8 @@
   // =========================
   // Meta
   // =========================
-  var meta = { version: 2, dpi: DPI, maxPx: MAX_PX, plates: [], cards: [] };
+  var meta = { version: 2, dpi: DPI, maxPx: MAX_PX, plates: [] };
   var placementById = {};
-  
-  // Global layer statistics (already calculated above)
-  var globalMaxLayerIndex = maxLayerIndex;
-  var globalLayerCount = totalLayerCount;
-  
-  // Industry standard thickness calculation:
-  // Base thickness per layer: 0.56mm (16pt) for standard card stock
-  // Total thickness = base thickness × layer count
-  // For multi-layer cards: each additional layer adds ~0.56mm
-  var baseThicknessPt = 16; // 16pt per layer (industry standard)
-  var baseThicknessMm = (baseThicknessPt / 1000) * 25.4; // Convert pt to mm
-  
-  // Add card-level metadata
-  for (var cardKey in cards) {
-    if (!cards.hasOwnProperty(cardKey)) continue;
-    var c = cards[cardKey];
-    var cardInfo = {
-      cardIndex: c.idx,
-      layerCount: c.layerCount,
-      maxLayerIndex: c.maxLayerIndex,
-      thicknessPt: baseThicknessPt * c.layerCount,
-      thicknessMm: baseThicknessMm * c.layerCount,
-      hasFront: !!c.sides.front,
-      hasBack: !!c.sides.back
-    };
-    meta.cards.push(cardInfo);
-  }
 
   function pushMeta(
     group,
@@ -761,16 +698,10 @@
     var x1 = Math.round(r.x1);
     var y1 = Math.round(r.y1);
 
-    // Get card info for layer count
-    var cardInfo = cards[group.idx] || null;
-    var cardLayerCount = cardInfo ? cardInfo.layerCount : 1;
-    
     meta.plates.push({
       id: outName,
       side: group.side,
-      layerIndex: group.idx, // depthIndex: which layer (0, 1, 2, ...)
-      physicalPlyIndex: 0, // For future use: physical ply in multi-ply construction
-      cardLayerCount: cardLayerCount, // Total number of layers for this card
+      layerIndex: group.idx,
       type: type,
       file: outName + ".png",
 
@@ -805,8 +736,6 @@
       endPx: { x: x1, y: y1 },
       rectPx: { x0: x0, y0: y0, x1: x1, y1: y1, w: Math.round(r.w), h: Math.round(r.h) },
       sizePx: { w: pngW, h: pngH },
-      layerIndex: group.idx,
-      cardLayerCount: cardInfo ? cardInfo.layerCount : 1,
     };
   }
 
@@ -891,15 +820,6 @@
       exportGroup(cards[idxStr].sides.back);
     }
 
-    // Add global layer statistics to meta
-    meta.globalLayerStats = {
-      maxLayerIndex: globalMaxLayerIndex,
-      totalLayerCount: globalLayerCount,
-      baseThicknessPt: baseThicknessPt,
-      baseThicknessMm: baseThicknessMm,
-      cardCount: Object.keys(cards).length
-    };
-    
     // Write meta.json
     var metaFile = new File(outDir + "/meta.json");
     metaFile.encoding = "UTF-8";

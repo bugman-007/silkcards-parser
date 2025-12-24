@@ -674,6 +674,7 @@
   // Meta
   // =========================
   var meta = { version: 2, dpi: DPI, maxPx: MAX_PX, plates: [] };
+  var placementById = {};
 
   function pushMeta(
     group,
@@ -727,6 +728,15 @@
       // Exported image size (the PNG itself)
       sizePx: { w: pngW, h: pngH },
     });
+    // Also store placement in a merge-friendly map (id -> placement)
+    placementById[outName] = {
+      dpiUsed: dpiUsed,
+      cardPx: { w: cardWpx, h: cardHpx },
+      startPx: { x: x0, y: y0 },
+      endPx: { x: x1, y: y1 },
+      rectPx: { x0: x0, y0: y0, x1: x1, y1: y1, w: Math.round(r.w), h: Math.round(r.h) },
+      sizePx: { w: pngW, h: pngH },
+    };
   }
 
   // =========================
@@ -813,9 +823,17 @@
     // Write meta.json
     var metaFile = new File(outDir + "/meta.json");
     metaFile.encoding = "UTF-8";
-    metaFile.open("w");
+    if (!metaFile.open("w")) throw new Error("Failed to open meta.json for writing");
     metaFile.write(stringify(meta, true));
     metaFile.close();
+
+    // Write placement.json (service should merge this into its final meta.json)
+    var placementFile = new File(outDir + "/placement.json");
+    placementFile.encoding = "UTF-8";
+    if (!placementFile.open("w")) throw new Error("Failed to open placement.json for writing");
+    placementFile.write(stringify({ version: 1, plates: placementById }, true));
+    placementFile.close();
+
   } finally {
     cleanupTempArtboard();
   }

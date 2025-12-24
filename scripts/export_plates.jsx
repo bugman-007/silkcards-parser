@@ -824,16 +824,12 @@
     var metaFile = new File(outDir + "/meta.json");
     metaFile.encoding = "UTF-8";
     if (!metaFile.open("w")) throw new Error("Failed to open meta.json for writing");
+
+    // Also include placement lookup table inside meta.json (no separate file needed)
+    meta.placementById = placementById;
+
     metaFile.write(stringify(meta, true));
     metaFile.close();
-
-    // Write placement.json (service should merge this into its final meta.json)
-    var placementFile = new File(outDir + "/placement.json");
-    placementFile.encoding = "UTF-8";
-    if (!placementFile.open("w")) throw new Error("Failed to open placement.json for writing");
-    placementFile.write(stringify({ version: 1, plates: placementById }, true));
-    placementFile.close();
-
   } finally {
     cleanupTempArtboard();
   }

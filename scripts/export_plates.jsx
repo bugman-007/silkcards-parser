@@ -534,8 +534,10 @@
   }
 
   function chooseDpiForRect(cardRectPt) {
-    var wPt = rectW(cardRectPt), hPt = rectH(cardRectPt);
-    var wPxWant = ptsToPx(wPt, DPI), hPxWant = ptsToPx(hPt, DPI);
+    var wPt = rectW(cardRectPt),
+      hPt = rectH(cardRectPt);
+    var wPxWant = ptsToPx(wPt, DPI),
+      hPxWant = ptsToPx(hPt, DPI);
 
     var dpiUsed = DPI;
     if (wPxWant > MAX_PX || hPxWant > MAX_PX) {
@@ -576,7 +578,7 @@
 
     var c = cards[idxKey];
     var frontSeed = pickSeedBoundsForSide(c.sides.front);
-    var backSeed  = pickSeedBoundsForSide(c.sides.back);
+    var backSeed = pickSeedBoundsForSide(c.sides.back);
 
     // If one side missing, mirror from the other
     if (!frontSeed && backSeed) frontSeed = backSeed;
@@ -585,7 +587,8 @@
     // Last resort: artboard (avoid if possible)
     if (!frontSeed && !backSeed) {
       var ab = doc.artboards[0].artboardRect;
-      frontSeed = ab; backSeed = ab;
+      frontSeed = ab;
+      backSeed = ab;
     }
 
     // Decide card size from seeds (max W/H so both sides share the same size)
@@ -595,14 +598,14 @@
     // OPTIONAL: if you have known card size, you can override here via __PARSER_ARGS__.cardWPt / cardHPt
 
     var frontCardRectPt = centerRectAround(frontSeed, wPt, hPt);
-    var backCardRectPt  = centerRectAround(backSeed,  wPt, hPt);
+    var backCardRectPt = centerRectAround(backSeed, wPt, hPt);
 
     // Lock one dpiUsed per index (based on the card size)
     var dpiUsedIndex = chooseDpiForRect(frontCardRectPt);
 
     cardByIndex[idxKey] = {
       dpiUsed: dpiUsedIndex,
-      rectBySide: { front: frontCardRectPt, back: backCardRectPt }
+      rectBySide: { front: frontCardRectPt, back: backCardRectPt },
     };
   }
 
@@ -670,7 +673,7 @@
   // =========================
   // Meta
   // =========================
-  var meta = { dpi: DPI, maxPx: MAX_PX, plates: [] };
+  var meta = { version: 2, dpi: DPI, maxPx: MAX_PX, plates: [] };
 
   function pushMeta(
     group,
@@ -682,20 +685,46 @@
     pngW,
     pngH
   ) {
+    // r is placement of exportRect within the cardRect, in PIXELS
     var r = rectToCardPx(cardRectPt, exportRectPt, dpiUsed);
+
+    // Full card canvas size at this dpi (PIXELS)
+    var cardWpx = Math.round(ptsToPx(rectW(cardRectPt), dpiUsed));
+    var cardHpx = Math.round(ptsToPx(rectH(cardRectPt), dpiUsed));
+
+    var x0 = Math.round(r.x0);
+    var y0 = Math.round(r.y0);
+    var x1 = Math.round(r.x1);
+    var y1 = Math.round(r.y1);
+
     meta.plates.push({
       id: outName,
       side: group.side,
       layerIndex: group.idx,
       type: type,
       file: outName + ".png",
+
+      // dpi used for THIS plate (forced per index in your current export path)
       dpiUsed: dpiUsed,
+
+      // ✅ Card canvas size (so frontend knows the coordinate space)
+      cardPx: { w: cardWpx, h: cardHpx },
+
+      // ✅ Start / End points (top-left origin, in card pixel space)
+      startPx: { x: x0, y: y0 },
+      endPx: { x: x1, y: y1 },
+
+      // ✅ Full rect (also includes w/h for convenience)
       rectPx: {
-        x0: Math.round(r.x0),
-        y0: Math.round(r.y0),
-        x1: Math.round(r.x1),
-        y1: Math.round(r.y1),
+        x0: x0,
+        y0: y0,
+        x1: x1,
+        y1: y1,
+        w: Math.round(r.w),
+        h: Math.round(r.h),
       },
+
+      // Exported image size (the PNG itself)
       sizePx: { w: pngW, h: pngH },
     });
   }
@@ -706,8 +735,11 @@
   try {
     // Iterate per card index (shared card rect for front+back)
     var idxList = [];
-    for (var idxStr in cards) if (cards.hasOwnProperty(idxStr)) idxList.push(idxStr);
-    idxList.sort(function(a,b){ return parseInt(a,10) - parseInt(b,10); });
+    for (var idxStr in cards)
+      if (cards.hasOwnProperty(idxStr)) idxList.push(idxStr);
+    idxList.sort(function (a, b) {
+      return parseInt(a, 10) - parseInt(b, 10);
+    });
 
     for (var ii = 0; ii < idxList.length; ii++) {
       var idxStr = idxList[ii];

@@ -336,7 +336,7 @@
   }
 
   // Export PNG clipped to rect. Returns { dpiUsed, wPx, hPx }
-  function exportPNGClipped(name, clipRectPt) {
+  function exportPNGClipped(name, clipRectPt, forcedDpi) {
     initTempArtboard();
 
     var file = new File(outDir + "/" + name + ".png");
@@ -344,14 +344,18 @@
     var wPt = rectW(clipRectPt);
     var hPt = rectH(clipRectPt);
 
-    var wPxWant = ptsToPx(wPt, DPI);
-    var hPxWant = ptsToPx(hPt, DPI);
+    var dpiUsed = forcedDpi != null ? forcedDpi : DPI;
 
-    var dpiUsed = DPI;
-    if (wPxWant > MAX_PX || hPxWant > MAX_PX) {
-      var scaleDown = Math.max(wPxWant / MAX_PX, hPxWant / MAX_PX);
-      dpiUsed = Math.floor(DPI / scaleDown);
-      if (dpiUsed < 150) dpiUsed = 150;
+    // If not forced, apply MAX_PX limiter as before
+    if (forcedDpi == null) {
+      var wPxWant = ptsToPx(wPt, DPI);
+      var hPxWant = ptsToPx(hPt, DPI);
+
+      if (wPxWant > MAX_PX || hPxWant > MAX_PX) {
+        var scaleDown = Math.max(wPxWant / MAX_PX, hPxWant / MAX_PX);
+        dpiUsed = Math.floor(DPI / scaleDown);
+        if (dpiUsed < 150) dpiUsed = 150;
+      }
     }
 
     var scalePct = (dpiUsed / 72.0) * 100.0;
@@ -523,11 +527,83 @@
     return doc.artboards[0].artboardRect;
   }
 
-  // Precompute cardRectPt per index once
-  var cardRectByIndex = {};
+  function centerRectAround(seedBounds, wPt, hPt) {
+    var cx = (seedBounds[0] + seedBounds[2]) * 0.5;
+    var cy = (seedBounds[1] + seedBounds[3]) * 0.5;
+    return [cx - wPt * 0.5, cy + hPt * 0.5, cx + wPt * 0.5, cy - hPt * 0.5];
+  }
+
+  function chooseDpiForRect(cardRectPt) {
+    var wPt = rectW(cardRectPt), hPt = rectH(cardRectPt);
+    var wPxWant = ptsToPx(wPt, DPI), hPxWant = ptsToPx(hPt, DPI);
+
+    var dpiUsed = DPI;
+    if (wPxWant > MAX_PX || hPxWant > MAX_PX) {
+      var scaleDown = Math.max(wPxWant / MAX_PX, hPxWant / MAX_PX);
+      dpiUsed = Math.floor(DPI / scaleDown);
+      if (dpiUsed < 150) dpiUsed = 150;
+    }
+    return dpiUsed;
+  }
+
+  function pickSeedBoundsForSide(group) {
+    if (!group) return null;
+
+    // Prefer PRINT bounds on this side
+    var printU = unionBoundsFromGroupByType(group, "PRINT");
+    if (printU) return printU;
+
+    // Then effects
+    var fxU = null;
+    fxU = unionBounds(fxU, unionBoundsFromGroupByType(group, "FOIL"));
+    fxU = unionBounds(fxU, unionBoundsFromGroupByType(group, "UV"));
+    fxU = unionBounds(fxU, unionBoundsFromGroupByType(group, "EMBOSS"));
+    if (fxU) return fxU;
+
+    // Then any bounds
+    var anyU = null;
+    for (var i = 0; i < group.layers.length; i++) {
+      var b = getLayerBoundsVisible(group.layers[i]);
+      if (b) anyU = unionBounds(anyU, b);
+    }
+    return anyU;
+  }
+
+  // Per index: same card size (W/H), but per-side position (front/back can be elsewhere on the artboard)
+  var cardByIndex = {};
   for (var idxKey in cards) {
     if (!cards.hasOwnProperty(idxKey)) continue;
-    cardRectByIndex[idxKey] = pickCardRectForIndex(cards[idxKey]);
+
+    var c = cards[idxKey];
+    var frontSeed = pickSeedBoundsForSide(c.sides.front);
+    var backSeed  = pickSeedBoundsForSide(c.sides.back);
+
+    // If one side missing, mirror from the other
+    if (!frontSeed && backSeed) frontSeed = backSeed;
+    if (!backSeed && frontSeed) backSeed = frontSeed;
+
+    // Last resort: artboard (avoid if possible)
+    if (!frontSeed && !backSeed) {
+      var ab = doc.artboards[0].artboardRect;
+      frontSeed = ab; backSeed = ab;
+    }
+
+    // Decide card size from seeds (max W/H so both sides share the same size)
+    var wPt = Math.max(rectW(frontSeed), rectW(backSeed));
+    var hPt = Math.max(rectH(frontSeed), rectH(backSeed));
+
+    // OPTIONAL: if you have known card size, you can override here via __PARSER_ARGS__.cardWPt / cardHPt
+
+    var frontCardRectPt = centerRectAround(frontSeed, wPt, hPt);
+    var backCardRectPt  = centerRectAround(backSeed,  wPt, hPt);
+
+    // Lock one dpiUsed per index (based on the card size)
+    var dpiUsedIndex = chooseDpiForRect(frontCardRectPt);
+
+    cardByIndex[idxKey] = {
+      dpiUsed: dpiUsedIndex,
+      rectBySide: { front: frontCardRectPt, back: backCardRectPt }
+    };
   }
 
   // Compute a “typical” card size for the group, without using union across tiles
@@ -638,11 +714,14 @@
       if (!cards.hasOwnProperty(idxStr)) continue;
 
       var idx = parseInt(idxStr, 10);
-      var cardRectPt = cardRectByIndex[idxStr]; // shared rect for this card index
+      var cardInfo = cardByIndex[idxStr];
+      var dpiForced = cardInfo.dpiUsed;
 
       // Export both sides if present
       function exportGroup(g) {
         if (!g) return;
+
+        var cardRectPt = cardInfo.rectBySide[g.side];
 
         for (var k = 0; k < g.layers.length; k++) {
           var layer = g.layers[k];
@@ -677,7 +756,7 @@
             outName = layer.name + "_mask";
           }
 
-          var info = exportPNGClipped(outName, exportRectPt);
+          var info = exportPNGClipped(outName, exportRectPt, dpiForced);
           pushMeta(
             g,
             type,

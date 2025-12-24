@@ -824,7 +824,6 @@
     var metaFile = new File(outDir + "/meta.json");
     metaFile.encoding = "UTF-8";
     if (!metaFile.open("w")) throw new Error("Failed to open meta.json for writing");
-
     // Also include placement lookup table inside meta.json (no separate file needed)
     meta.placementById = placementById;
 

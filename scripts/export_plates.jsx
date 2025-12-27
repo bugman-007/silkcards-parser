@@ -218,6 +218,15 @@
     }
   }
 
+  function walkLayerItemsDeep(layer, cb) {
+    walkPageItems(layer, cb);
+    try {
+      for (var i = 0; i < layer.layers.length; i++) {
+        walkLayerItemsDeep(layer.layers[i], cb);
+      }
+    } catch (e) {}
+  }
+
   function collectLayerBounds(layer) {
     var bounds = null;
     walkPageItems(layer, function (it) {
@@ -472,9 +481,9 @@
   }
 
   function exportDiecutOutlineSVGFromLayer(layer, svgBaseName, cardRectPt) {
-    // Collect candidate items from the diecut layer
+    // Collect candidate items from the diecut layer (including sublayers)
     var candidates = [];
-    walkPageItems(layer, function (it) {
+    walkLayerItemsDeep(layer, function (it) {
       try { if (it.hidden) return; } catch (e0) {}
 
       // Only vector shapes
@@ -484,6 +493,11 @@
 
       var b = getBounds(it);
       if (!b) return;
+
+      // Skip clipping paths (common in AI masks)
+      try { if (tn === "PathItem" && it.clipping) return; } catch (eclip) {}
+      // Also skip paths inside clipped groups
+      try { if (it.parent && it.parent.typename === "GroupItem" && it.parent.clipped) return; } catch (ecl2) {}
 
       // Filter out guide rectangles (red borders, etc.)
       if (tn === "PathItem" && isLikelyGuideRect(it, b, cardRectPt)) return;
@@ -533,17 +547,38 @@
         try { tmp.pageItems[p].translate(dx, dy); } catch (et) {}
       }
 
-      // Select all and unite/expand to get a single clean shape
+      // Select all vector items (avoid selecting anything weird)
       tmp.selection = null;
+
+      var selectableCount = 0;
       for (var s = 0; s < tmp.pageItems.length; s++) {
-        try { tmp.pageItems[s].selected = true; } catch (es) {}
+        try {
+          var it = tmp.pageItems[s];
+          // Only select vector-ish items
+          if (it.typename === "PathItem" || it.typename === "CompoundPathItem" || it.typename === "GroupItem") {
+            it.selected = true;
+            selectableCount++;
+          }
+        } catch (es) {}
       }
 
-      // Pathfinder Unite + Expand (menu commands; standard Illustrator scripting pattern)
-      try { app.executeMenuCommand("Live Pathfinder Add"); } catch (e1) {}
-      try { app.executeMenuCommand("expandStyle"); } catch (e2) {}
-      try { app.executeMenuCommand("ungroup"); } catch (e3) {}
-      try { app.executeMenuCommand("ungroup"); } catch (e4) {}
+      // IMPORTANT: ensure tmp is active before menu commands
+      tmp.activate();
+
+      // Pathfinder Unite + Expand only if it can actually do something
+      var shouldUnite = false;
+      try {
+        if (tmp.groupItems.length > 0) shouldUnite = true;
+        if (tmp.pathItems.length + tmp.compoundPathItems.length > 1) shouldUnite = true;
+      } catch (e) {}
+
+      if (shouldUnite) {
+        try { app.executeMenuCommand("Live Pathfinder Add"); } catch (e1) {}
+        try { app.executeMenuCommand("expandStyle"); } catch (e2) {}
+        try { app.executeMenuCommand("ungroup"); } catch (e3) {}
+        try { app.executeMenuCommand("ungroup"); } catch (e4) {}
+      }
+      // else: No need to pathfinder; just continue to styling/export
 
       // Convert resulting paths to stroke-only outline
       // (handle PathItem + CompoundPathItem)

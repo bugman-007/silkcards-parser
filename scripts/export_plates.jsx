@@ -391,10 +391,196 @@
   function exportSVG(name) {
     var file = new File(outDir + "/" + name + ".svg");
     var opts = new ExportOptionsSVG();
-    opts.embedRasterImages = true;
+    opts.embedRasterImages = false; // Safe default: keep SVGs clean
     opts.fontSubsetting = SVGFontSubsetting.GLYPHSUSED;
     opts.coordinatePrecision = 3;
     doc.exportFile(file, ExportType.SVG, opts);
+  }
+
+  // =========================
+  // DIECUT SVG (outline-only) export
+  // - Creates a temp document sized to cardRectPt
+  // - Duplicates only diecut shapes (filters out red guide rectangles)
+  // - Unites shapes, expands, converts to stroke-only outline
+  // - Exports a clean SVG
+  // =========================
+
+  function isRedStrokeColor(c) {
+    if (!c) return false;
+    try {
+      if (c.typename === "RGBColor") {
+        return c.red >= 200 && c.green <= 80 && c.blue <= 80;
+      }
+      if (c.typename === "CMYKColor") {
+        // Red-ish in CMYK: high M/Y, low C/K (heuristic)
+        return c.cyan <= 20 && c.magenta >= 60 && c.yellow >= 60 && c.black <= 30;
+      }
+      if (c.typename === "SpotColor") {
+        // Spot colors can be used for guides; check spot name if possible
+        var sn = "";
+        try { sn = (c.spot && c.spot.name) ? String(c.spot.name).toLowerCase() : ""; } catch (e) {}
+        if (sn.indexOf("red") >= 0 || sn.indexOf("guide") >= 0 || sn.indexOf("bleed") >= 0) return true;
+      }
+    } catch (e0) {}
+    return false;
+  }
+
+  function nameLooksGuide(it) {
+    var n = "";
+    try { n = it.name ? String(it.name).toLowerCase() : ""; } catch (e) {}
+    if (!n) return false;
+    return (
+      n.indexOf("guide") >= 0 ||
+      n.indexOf("bleed") >= 0 ||
+      n.indexOf("safe") >= 0 ||
+      n.indexOf("margin") >= 0 ||
+      n.indexOf("frame") >= 0
+    );
+  }
+
+  function isLikelyGuideRect(it, b, cardRectPt) {
+    if (!it || !b) return false;
+
+    // Only consider stroked, no-fill PathItems
+    try {
+      if (it.typename !== "PathItem") return false;
+      if (!it.stroked) return false;
+      if (it.filled && it.fillColor && it.fillColor.typename !== "NoColor") return false;
+    } catch (e0) { return false; }
+
+    // If explicitly named as guide -> always ignore
+    if (nameLooksGuide(it)) return true;
+
+    // Otherwise require rectangle-ish + near-frame + red stroke
+    var isRectish = false;
+    try { isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4; } catch (e1) {}
+
+    if (!isRectish) return false;
+
+    var tol = 3.0;
+    var near =
+      Math.abs(b[0] - cardRectPt[0]) <= tol ||
+      Math.abs(b[2] - cardRectPt[2]) <= tol ||
+      Math.abs(b[1] - cardRectPt[1]) <= tol ||
+      Math.abs(b[3] - cardRectPt[3]) <= tol;
+
+    if (!near) return false;
+
+    // Only now use red-stroke as signal
+    try { return isRedStrokeColor(it.strokeColor); } catch (e2) {}
+    return false;
+  }
+
+  function exportDiecutOutlineSVGFromLayer(layer, svgBaseName, cardRectPt) {
+    // Collect candidate items from the diecut layer
+    var candidates = [];
+    walkPageItems(layer, function (it) {
+      try { if (it.hidden) return; } catch (e0) {}
+
+      // Only vector shapes
+      var tn = "";
+      try { tn = it.typename; } catch (e1) {}
+      if (tn !== "PathItem" && tn !== "CompoundPathItem") return;
+
+      var b = getBounds(it);
+      if (!b) return;
+
+      // Filter out guide rectangles (red borders, etc.)
+      if (tn === "PathItem" && isLikelyGuideRect(it, b, cardRectPt)) return;
+
+      // Also skip full-card frames using your existing heuristic when it's clearly a frame
+      // (but ONLY if it's stroked/no-fill; avoid dropping real card-outline diecut)
+      try {
+        if (tn === "PathItem") {
+          if (it.stroked && (!it.filled || (it.fillColor && it.fillColor.typename === "NoColor"))) {
+            if (isLikelyFrameItem(it, b, rectW(cardRectPt), rectH(cardRectPt))) {
+              // if it also looks like a guide (red stroke/name), drop it
+              if (isRedStrokeColor(it.strokeColor) || nameLooksGuide(it)) return;
+            }
+          }
+        }
+      } catch (e2) {}
+
+      candidates.push(it);
+    });
+
+    if (candidates.length === 0) return null;
+
+    // Create temp document in points with artboard = cardRectPt size
+    var wPt = rectW(cardRectPt);
+    var hPt = rectH(cardRectPt);
+
+    var tmp = app.documents.add(DocumentColorSpace.RGB, wPt, hPt);
+    try {
+      // Force single artboard rect to [0, h, w, 0]
+      try {
+        tmp.artboards[0].artboardRect = [0, hPt, wPt, 0];
+        tmp.artboards.setActiveArtboardIndex(0);
+      } catch (eab) {}
+
+      // Duplicate candidates into tmp doc
+      for (var i = 0; i < candidates.length; i++) {
+        try {
+          candidates[i].duplicate(tmp, ElementPlacement.PLACEATBEGINNING);
+        } catch (ed) {}
+      }
+
+      // Translate everything so cardRectPt maps to tmp artboard origin
+      // dx = -left, dy = -bottom
+      var dx = -cardRectPt[0];
+      var dy = -cardRectPt[3];
+      for (var p = 0; p < tmp.pageItems.length; p++) {
+        try { tmp.pageItems[p].translate(dx, dy); } catch (et) {}
+      }
+
+      // Select all and unite/expand to get a single clean shape
+      tmp.selection = null;
+      for (var s = 0; s < tmp.pageItems.length; s++) {
+        try { tmp.pageItems[s].selected = true; } catch (es) {}
+      }
+
+      // Pathfinder Unite + Expand (menu commands; standard Illustrator scripting pattern)
+      try { app.executeMenuCommand("Live Pathfinder Add"); } catch (e1) {}
+      try { app.executeMenuCommand("expandStyle"); } catch (e2) {}
+      try { app.executeMenuCommand("ungroup"); } catch (e3) {}
+      try { app.executeMenuCommand("ungroup"); } catch (e4) {}
+
+      // Convert resulting paths to stroke-only outline
+      // (handle PathItem + CompoundPathItem)
+      function stylePathItem(pi) {
+        try { pi.filled = false; } catch (e0) {}
+        try { pi.stroked = true; } catch (e1) {}
+        try { pi.strokeWidth = 1; } catch (e2) {}
+        try {
+          var c = new RGBColor();
+          c.red = 0; c.green = 0; c.blue = 0;
+          pi.strokeColor = c;
+        } catch (e3) {}
+      }
+
+      for (var q = 0; q < tmp.pathItems.length; q++) {
+        try { stylePathItem(tmp.pathItems[q]); } catch (e5) {}
+      }
+      for (var cp = 0; cp < tmp.compoundPathItems.length; cp++) {
+        try {
+          var cpi = tmp.compoundPathItems[cp];
+          // compoundPathItems contain pathItems children
+          for (var k = 0; k < cpi.pathItems.length; k++) stylePathItem(cpi.pathItems[k]);
+        } catch (e6) {}
+      }
+
+      // Export SVG
+      var file = new File(outDir + "/" + svgBaseName + ".svg");
+      var opts = new ExportOptionsSVG();
+      opts.embedRasterImages = false; // critical: keep it small/clean
+      opts.coordinatePrecision = 3;
+      opts.fontSubsetting = SVGFontSubsetting.GLYPHSUSED;
+      tmp.exportFile(file, ExportType.SVG, opts);
+
+      return svgBaseName + ".svg";
+    } finally {
+      try { tmp.close(SaveOptions.DONOTSAVECHANGES); } catch (eclose) {}
+    }
   }
 
   // =========================
@@ -684,7 +870,8 @@
     exportRectPt,
     dpiUsed,
     pngW,
-    pngH
+    pngH,
+    assets
   ) {
     // r is placement of exportRect within the cardRect, in PIXELS
     var r = rectToCardPx(cardRectPt, exportRectPt, dpiUsed);
@@ -698,36 +885,21 @@
     var x1 = Math.round(r.x1);
     var y1 = Math.round(r.y1);
 
-    meta.plates.push({
+    var plate = {
       id: outName,
       side: group.side,
       layerIndex: group.idx,
       type: type,
       file: outName + ".png",
-
-      // dpi used for THIS plate (forced per index in your current export path)
       dpiUsed: dpiUsed,
-
-      // ✅ Card canvas size (so frontend knows the coordinate space)
       cardPx: { w: cardWpx, h: cardHpx },
-
-      // ✅ Start / End points (top-left origin, in card pixel space)
       startPx: { x: x0, y: y0 },
       endPx: { x: x1, y: y1 },
-
-      // ✅ Full rect (also includes w/h for convenience)
-      rectPx: {
-        x0: x0,
-        y0: y0,
-        x1: x1,
-        y1: y1,
-        w: Math.round(r.w),
-        h: Math.round(r.h),
-      },
-
-      // Exported image size (the PNG itself)
-      sizePx: { w: pngW, h: pngH },
-    });
+      rectPx: { x0: x0, y0: y0, x1: x1, y1: y1, w: Math.round(r.w), h: Math.round(r.h) },
+      sizePx: { w: pngW, h: pngH }
+    };
+    if (assets) plate.assets = assets;
+    meta.plates.push(plate);
     // Also store placement in a merge-friendly map (id -> placement)
     placementById[outName] = {
       dpiUsed: dpiUsed,
@@ -799,6 +971,16 @@
           }
 
           var info = exportPNGClipped(outName, exportRectPt, dpiForced);
+
+          var assets = null;
+
+          if (type === "DIECUT") {
+            // Export a clean outline SVG in full card coordinate space
+            var svgBase = outName; // Use same base name as PNG (includes "_mask")
+            var svgFile = exportDiecutOutlineSVGFromLayer(layer, svgBase, cardRectPt);
+            if (svgFile) assets = { svg: svgFile };
+          }
+
           pushMeta(
             g,
             type,
@@ -807,12 +989,9 @@
             exportRectPt,
             info.dpiUsed,
             info.wPx,
-            info.hPx
+            info.hPx,
+            assets
           );
-
-          if (type === "DIECUT") {
-            exportSVG(layer.name);
-          }
         }
       }
 

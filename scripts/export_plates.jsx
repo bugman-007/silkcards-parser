@@ -570,15 +570,24 @@
       // Pathfinder Unite + Expand only if it can actually do something
       var shouldUnite = false;
       try {
-        var pathLike = tmp.pathItems.length + tmp.compoundPathItems.length;
-        shouldUnite = pathLike > 1;
+        var sel = tmp.selection;
+        var selCount = sel ? sel.length : 0;
+        shouldUnite = selCount >= 2;  // KEY: count selected top-level objects
       } catch (e) {}
 
       if (shouldUnite) {
-        try { app.executeMenuCommand("Live Pathfinder Add"); } catch (e1) {}
-        try { app.executeMenuCommand("expandStyle"); } catch (e2) {}
-        try { app.executeMenuCommand("ungroup"); } catch (e3) {}
-        try { app.executeMenuCommand("ungroup"); } catch (e4) {}
+        var oldUIL = app.userInteractionLevel;
+        app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
+        try {
+          app.executeMenuCommand("Live Pathfinder Add");
+          app.executeMenuCommand("expandStyle");
+          app.executeMenuCommand("ungroup");
+          app.executeMenuCommand("ungroup");
+        } catch (e) {
+          // ignore
+        } finally {
+          app.userInteractionLevel = oldUIL;
+        }
       }
       // else: No need to pathfinder; just continue to styling/export
 

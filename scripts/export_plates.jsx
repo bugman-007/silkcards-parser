@@ -495,7 +495,7 @@
       if (!b) return;
 
       // Skip clipping paths (common in AI masks)
-      try { if (tn === "PathItem" && it.clipping) return; } catch (eclip) {}
+      try { if (it.clipping) return; } catch (eclip) {}
       // Also skip paths inside clipped groups
       try { if (it.parent && it.parent.typename === "GroupItem" && it.parent.clipped) return; } catch (ecl2) {}
 

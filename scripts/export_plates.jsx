@@ -532,10 +532,10 @@
         tmp.artboards.setActiveArtboardIndex(0);
       } catch (eab) {}
 
-      // Duplicate candidates into tmp doc
+      // Duplicate candidates into tmp active layer (more predictable than document root)
       for (var i = 0; i < candidates.length; i++) {
         try {
-          candidates[i].duplicate(tmp, ElementPlacement.PLACEATBEGINNING);
+          candidates[i].duplicate(tmp.activeLayer, ElementPlacement.PLACEATBEGINNING);
         } catch (ed) {}
       }
 
@@ -547,29 +547,31 @@
         try { tmp.pageItems[p].translate(dx, dy); } catch (et) {}
       }
 
-      // Select all vector items (avoid selecting anything weird)
-      tmp.selection = null;
-
-      var selectableCount = 0;
-      for (var s = 0; s < tmp.pageItems.length; s++) {
-        try {
-          var it = tmp.pageItems[s];
-          // Only select vector-ish items
-          if (it.typename === "PathItem" || it.typename === "CompoundPathItem" || it.typename === "GroupItem") {
-            it.selected = true;
-            selectableCount++;
-          }
-        } catch (es) {}
-      }
-
       // IMPORTANT: ensure tmp is active before menu commands
       tmp.activate();
+
+      // Make selection deterministic: select all, ungroup several times
+      try { app.executeMenuCommand("selectall"); } catch (e0) {}
+      for (var u = 0; u < 6; u++) {
+        try { app.executeMenuCommand("ungroup"); } catch (e1) {}
+      }
+
+      // Now select only path-like items (avoid selecting groups entirely)
+      tmp.selection = null;
+      for (var s2 = 0; s2 < tmp.pageItems.length; s2++) {
+        try {
+          var it2 = tmp.pageItems[s2];
+          if (it2.typename === "PathItem" || it2.typename === "CompoundPathItem") {
+            it2.selected = true;
+          }
+        } catch (e2) {}
+      }
 
       // Pathfinder Unite + Expand only if it can actually do something
       var shouldUnite = false;
       try {
-        if (tmp.groupItems.length > 0) shouldUnite = true;
-        if (tmp.pathItems.length + tmp.compoundPathItems.length > 1) shouldUnite = true;
+        var pathLike = tmp.pathItems.length + tmp.compoundPathItems.length;
+        shouldUnite = pathLike > 1;
       } catch (e) {}
 
       if (shouldUnite) {

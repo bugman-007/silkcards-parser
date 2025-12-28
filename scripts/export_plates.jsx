@@ -553,13 +553,22 @@
         } catch (ed) {}
       }
 
+      // Group all duplicated items and translate ONCE (prevents double-translation)
+      var rootG = tmp.activeLayer.groupItems.add();
+
+      // Move all top-level items in the layer into rootG (iterate backwards)
+      for (var mi = tmp.activeLayer.pageItems.length - 1; mi >= 0; mi--) {
+        var pit = tmp.activeLayer.pageItems[mi];
+        if (pit !== rootG) {
+          try { pit.moveToBeginning(rootG); } catch (em) {}
+        }
+      }
+
       // Translate everything so cardRectPt maps to tmp artboard origin
       // dx = -left, dy = -bottom
       var dx = -cardRectPt[0];
       var dy = -cardRectPt[3];
-      for (var p = 0; p < tmp.pageItems.length; p++) {
-        try { tmp.pageItems[p].translate(dx, dy); } catch (et) {}
-      }
+      try { rootG.translate(dx, dy); } catch (et2) {}
 
       // IMPORTANT: ensure tmp is active before menu commands
       tmp.activate();

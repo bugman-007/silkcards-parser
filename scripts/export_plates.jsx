@@ -477,6 +477,24 @@
       var b = getBounds(it);
       if (!b) return;
 
+      // Drop large filled rectangles used as mask scaffolding (common in DIECUT artwork)
+      if (tn === "PathItem") {
+        try {
+          var isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4;
+          var hasFill = it.filled && !(it.fillColor && it.fillColor.typename === "NoColor");
+          if (isRectish && hasFill) {
+            // if it covers most of the card, it's almost certainly scaffolding
+            if (rectArea(b) > rectArea(cardRectPt) * 0.35) return; // tune 0.35~0.8 as needed
+          }
+        } catch (e) {}
+      }
+
+      // Reject candidates that are mostly outside the card rect (prevents off-artboard junk)
+      var ib = intersectBounds(b, cardRectPt);
+      if (!ib) return; // completely outside
+      // If only a tiny intersection, treat as junk
+      if (rectArea(ib) < rectArea(b) * 0.2) return;
+
       // Skip clipping paths (common in AI masks)
       try { if (it.clipping) return; } catch (ecl2) {}
       // Also skip paths inside clipped groups
@@ -552,9 +570,9 @@
       }
 
       // Translate everything so cardRectPt maps to tmp artboard origin
-      // dx = -left, dy = -bottom
+      // dx = -left, dy maps card top to artboard top
       var dx = -cardRectPt[0];
-      var dy = -cardRectPt[3];
+      var dy = hPt - cardRectPt[1]; // map card top -> artboard top
       try { rootG.translate(dx, dy); } catch (et2) {}
 
       // IMPORTANT: ensure tmp is active before menu commands

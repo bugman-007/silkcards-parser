@@ -229,7 +229,7 @@
 
   function collectLayerBounds(layer) {
     var bounds = null;
-    walkPageItems(layer, function (it) {
+    walkLayerItemsDeep(layer, function (it) {
       try {
         if (it.hidden) return;
       } catch (e0) {}
@@ -237,10 +237,6 @@
       if (!b) return;
       bounds = unionBounds(bounds, b);
     });
-    try {
-      for (var j = 0; j < layer.layers.length; j++)
-        bounds = unionBounds(bounds, collectLayerBounds(layer.layers[j]));
-    } catch (e3) {}
     return bounds;
   }
 
@@ -495,12 +491,30 @@
       if (!b) return;
 
       // Skip clipping paths (common in AI masks)
-      try { if (it.clipping) return; } catch (eclip) {}
+      try { if (it.clipping) return; } catch (ecl2) {}
       // Also skip paths inside clipped groups
       try { if (it.parent && it.parent.typename === "GroupItem" && it.parent.clipped) return; } catch (ecl2) {}
 
       // Filter out guide rectangles (red borders, etc.)
       if (tn === "PathItem" && isLikelyGuideRect(it, b, cardRectPt)) return;
+
+      // Drop stroke-only rectangles that are near card bounds on ALL sides (regardless of color)
+      // This catches "mystery frame" rectangles that aren't red or named as guides
+      if (tn === "PathItem") {
+        try {
+          var isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4;
+          if (isRectish && it.stroked && (!it.filled || (it.fillColor && it.fillColor.typename === "NoColor"))) {
+            // if it's within a few points of card bounds on ALL sides, treat as a frame and drop
+            var tol2 = 3.0;
+            var nearAll =
+              Math.abs(b[0] - cardRectPt[0]) <= tol2 &&
+              Math.abs(b[2] - cardRectPt[2]) <= tol2 &&
+              Math.abs(b[1] - cardRectPt[1]) <= tol2 &&
+              Math.abs(b[3] - cardRectPt[3]) <= tol2;
+            if (nearAll) return;
+          }
+        } catch (e) {}
+      }
 
       // Also skip full-card frames using your existing heuristic when it's clearly a frame
       // (but ONLY if it's stroked/no-fill; avoid dropping real card-outline diecut)

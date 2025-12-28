@@ -263,26 +263,13 @@
 
   function collectLayerContentBounds(layer, cardW, cardH) {
     var bounds = null;
-
-    // Current layer items
-    walkPageItems(layer, function (it) {
-      try {
-        if (it.hidden) return;
-      } catch (e0) {}
+    walkLayerItemsDeep(layer, function (it) {
+      try { if (it.hidden) return; } catch (e0) {}
       var b = getBounds(it);
       if (!b) return;
       if (isLikelyFrameItem(it, b, cardW, cardH)) return;
       bounds = unionBounds(bounds, b);
     });
-
-    // IMPORTANT: include nested sublayers too (many AI files keep masks inside sublayers)
-    try {
-      for (var j = 0; j < layer.layers.length; j++) {
-        var child = collectLayerContentBounds(layer.layers[j], cardW, cardH);
-        if (child) bounds = unionBounds(bounds, child);
-      }
-    } catch (e1) {}
-
     return bounds;
   }
 

@@ -495,10 +495,14 @@
       // If only a tiny intersection, treat as junk
       if (rectArea(ib) < rectArea(b) * 0.2) return;
 
-      // Skip clipping paths (common in AI masks)
-      try { if (it.clipping) return; } catch (ecl2) {}
-      // Also skip paths inside clipped groups
-      try { if (it.parent && it.parent.typename === "GroupItem" && it.parent.clipped) return; } catch (ecl2) {}
+      // Clipping groups: KEEP the clipping path (it IS the outline), drop clipped contents
+      var isClip = false;
+      try { isClip = !!it.clipping; } catch (e0) {}
+
+      var parentClipped = false;
+      try { parentClipped = (it.parent && it.parent.typename === "GroupItem" && it.parent.clipped); } catch (e1) {}
+
+      if (parentClipped && !isClip) return; // drop clipped artwork, keep clip path
 
       // Filter out guide rectangles (red borders, etc.)
       if (tn === "PathItem" && isLikelyGuideRect(it, b, cardRectPt)) return;
@@ -1052,7 +1056,8 @@
             // Export a clean outline SVG in full card coordinate space
             var svgBase = outName; // Use same base name as PNG (includes "_mask")
             var svgFile = exportDiecutOutlineSVGFromLayer(layer, svgBase, cardRectPt);
-            if (svgFile) assets = { svg: svgFile };
+            if (!svgFile) throw new Error("Diecut SVG export failed: no candidates for " + layer.name);
+            assets = { svg: svgFile };
           }
 
           pushMeta(

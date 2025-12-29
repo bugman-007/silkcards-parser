@@ -481,20 +481,31 @@
     function isStrokeOnlyRectNearCard(it, b) {
       try {
         if (!it || it.typename !== "PathItem") return false;
+
         var isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4;
         if (!isRectish) return false;
 
         var strokeOnly = it.stroked && (!it.filled || (it.fillColor && it.fillColor.typename === "NoColor"));
         if (!strokeOnly) return false;
 
-        var tol = 3.0;
-        var nearAll =
-          Math.abs(b[0] - cardRectPt[0]) <= tol &&
-          Math.abs(b[2] - cardRectPt[2]) <= tol &&
-          Math.abs(b[1] - cardRectPt[1]) <= tol &&
-          Math.abs(b[3] - cardRectPt[3]) <= tol;
+        // More forgiving tolerance (frames are often bleed/safe guides)
+        var tol = 12.0;
 
-        return nearAll;
+        var L = b[0], T = b[1], R = b[2], B = b[3];
+        var cL = cardRectPt[0], cT = cardRectPt[1], cR = cardRectPt[2], cB = cardRectPt[3];
+
+        var nearEdges =
+          Math.abs(L - cL) <= tol &&
+          Math.abs(R - cR) <= tol &&
+          Math.abs(T - cT) <= tol &&
+          Math.abs(B - cB) <= tol;
+
+        // Also accept "near by size" even if slightly shifted
+        var nearSize =
+          approx(rectW(b), rectW(cardRectPt), 0.02) &&
+          approx(rectH(b), rectH(cardRectPt), 0.02);
+
+        return nearEdges || nearSize;
       } catch (e) {}
       return false;
     }
@@ -687,6 +698,35 @@
       var dx = -cardRectPt[0];
       var dy = hPt - cardRectPt[1]; // map card top -> artboard top
       try { rootG.translate(dx, dy); } catch (et2) {}
+
+      // LAST DEFENSE: remove any stroke-only rectangle that matches the temp artboard
+      function removeArtboardFrameRects(tmpDoc, wPt, hPt) {
+        var ab = [0, hPt, wPt, 0];
+        var tol = 12.0;
+
+        for (var i = tmpDoc.pathItems.length - 1; i >= 0; i--) {
+          var p = tmpDoc.pathItems[i];
+          try {
+            if (!p.closed || !p.pathPoints || p.pathPoints.length !== 4) continue;
+
+            var strokeOnly = p.stroked && (!p.filled || (p.fillColor && p.fillColor.typename === "NoColor"));
+            if (!strokeOnly) continue;
+
+            var bb = getBounds(p);
+            if (!bb) continue;
+
+            var match =
+              Math.abs(bb[0] - ab[0]) <= tol &&
+              Math.abs(bb[1] - ab[1]) <= tol &&
+              Math.abs(bb[2] - ab[2]) <= tol &&
+              Math.abs(bb[3] - ab[3]) <= tol;
+
+            if (match) p.remove();
+          } catch (e) {}
+        }
+      }
+
+      removeArtboardFrameRects(tmp, wPt, hPt);
 
       // IMPORTANT: ensure tmp is active before menu commands
       tmp.activate();
@@ -1187,6 +1227,27 @@
     return [cx - wPt * 0.5, cy + hPt * 0.5, cx + wPt * 0.5, cy - hPt * 0.5];
   }
 
+  function pickRepresentativeLayer(group) {
+    if (!group || !group.layers || group.layers.length === 0) return null;
+
+    // Prefer PRINT layer because it's usually full-card and stable
+    for (var i = 0; i < group.layers.length; i++) {
+      if (classifyType(group.layers[i].name) === "PRINT") return group.layers[i];
+    }
+    // Otherwise just use the first layer
+    return group.layers[0];
+  }
+
+  function getExactCardRectFromGroup(group, cardW, cardH) {
+    var rep = pickRepresentativeLayer(group);
+    if (!rep) return null;
+
+    // Ensure bounds are valid
+    soloLayer(rep);
+    var found = findLayerCardRect(rep, cardW, cardH);
+    return found;
+  }
+
   function chooseDpiForRect(cardRectPt) {
     var wPt = rectW(cardRectPt),
       hPt = rectH(cardRectPt);
@@ -1251,8 +1312,12 @@
 
     // OPTIONAL: if you have known card size, you can override here via __PARSER_ARGS__.cardWPt / cardHPt
 
-    var frontCardRectPt = centerRectAround(frontSeed, wPt, hPt);
-    var backCardRectPt = centerRectAround(backSeed, wPt, hPt);
+    // Try to find exact card rect from frame rectangles in representative layers
+    var frontExact = getExactCardRectFromGroup(c.sides.front, wPt, hPt);
+    var backExact  = getExactCardRectFromGroup(c.sides.back,  wPt, hPt);
+
+    var frontCardRectPt = frontExact ? frontExact : centerRectAround(frontSeed, wPt, hPt);
+    var backCardRectPt  = backExact  ? backExact  : centerRectAround(backSeed,  wPt, hPt);
 
     // Lock one dpiUsed per index (based on the card size)
     var dpiUsedIndex = chooseDpiForRect(frontCardRectPt);

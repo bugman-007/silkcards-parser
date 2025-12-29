@@ -900,45 +900,20 @@
       var hasContent = false;
       try { hasContent = allG && allG.pageItems && allG.pageItems.length > 0; } catch (eHC) {}
       
-      // 2) REGISTER: translate the whole vector output so it aligns to targetBounds
-      // The traced content should be at the PNG's location, but expandTracing() 
-      // sometimes creates paths at an offset location (often one card height off).
+      // 2) REGISTER: translate traced vectors to the ACTUAL placed PNG bounds (most reliable)
       if (hasContent) {
         var vb = getBounds(allG);
         if (vb && vb.length === 4) {
-          // Standard alignment: move traced content to targetBounds
-          var tdx = targetBounds[0] - vb[0];
-          var tdy = targetBounds[1] - vb[1];
-          
+          var ref = null;
+          if (placedB && placedB.length === 4) ref = placedB;
+          else if (traceB && traceB.length === 4) ref = traceB;
+          else ref = targetBounds;
+
+          var tdx = ref[0] - vb[0]; // align left
+          var tdy = ref[1] - vb[1]; // align top
           if (Math.abs(tdx) > 0.5 || Math.abs(tdy) > 0.5) {
             try { allG.translate(tdx, tdy); } catch (eReg) {}
             app.redraw();
-          }
-          
-          // CRITICAL: Re-check bounds after translation
-          // If content is still outside artboard, force correction
-          var vb2 = getBounds(allG);
-          if (vb2 && vb2.length === 4) {
-            // Artboard is [0, hPt, wPt, 0] - content should be within Y=0 to Y=hPt
-            // If content top (vb2[1]) is at or below 0, content is below artboard
-            
-            if (vb2[1] <= 0) {
-              // Content is entirely below artboard - this is the "one card height off" case
-              // Force it to align with targetBounds
-              var forceTdy = targetBounds[1] - vb2[1];
-              if (Math.abs(forceTdy) > 0.5) {
-                try { allG.translate(0, forceTdy); } catch (eForce) {}
-                app.redraw();
-              }
-            } else if (vb2[3] < -hPt * 0.1) {
-              // Content extends significantly below artboard bottom
-              // Shift up so bottom is at Y=0
-              var forceTdy = -vb2[3];
-              if (Math.abs(forceTdy) > 0.5) {
-                try { allG.translate(0, forceTdy); } catch (eForce) {}
-                app.redraw();
-              }
-            }
           }
         }
       }
@@ -997,6 +972,20 @@
 
           // ignore tiny junk
           if (rectArea(bb) < targetArea * 0.10) return;
+          // Deterministic kill: remove any path whose bounds match the placed PNG bounds (crop/frame)
+          var tolEdge = 12.0;
+          var refB = (placedB && placedB.length === 4) ? placedB : targetBounds;
+
+          var isFrameByBounds =
+            Math.abs(bb[0] - refB[0]) <= tolEdge &&
+            Math.abs(bb[1] - refB[1]) <= tolEdge &&
+            Math.abs(bb[2] - refB[2]) <= tolEdge &&
+            Math.abs(bb[3] - refB[3]) <= tolEdge;
+
+          if (isFrameByBounds) {
+            rects.push(it);
+            return;
+          }
 
           if (isRectangleLikePath(it, bb, 2.5, 0.06)) {
             rects.push(it);

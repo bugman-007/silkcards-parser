@@ -950,86 +950,63 @@
         }
       } catch (eN) {}
 
-      // 3) REMOVE rectangle-like paths (crop border + frame rectangles)
-      // Works even if tracing created many points.
-      function walkGroup(container, cb) {
+      // 3) REMOVE the crop-border/frame by BOUNDS MATCH (works for PathItem / CompoundPathItem / GroupItem)
+      function walkAny(container, cb) {
         try {
-          if (!container || !container.pageItems) return;
-          for (var i = 0; i < container.pageItems.length; i++) {
-            var it = container.pageItems[i];
-            cb(it);
-            if (it.typename === "GroupItem") walkGroup(it, cb);
-            if (it.typename === "CompoundPathItem") {
-              try {
-                for (var j = 0; j < it.pathItems.length; j++) cb(it.pathItems[j]);
-              } catch (eCP) {}
+          if (!container) return;
+          cb(container);
+
+          if (container.pageItems) {
+            for (var i = 0; i < container.pageItems.length; i++) {
+              walkAny(container.pageItems[i], cb);
+            }
+          }
+
+          // CompoundPathItem children are PathItems, but we also want to consider the compound itself
+          if (container.typename === "CompoundPathItem" && container.pathItems) {
+            for (var j = 0; j < container.pathItems.length; j++) {
+              cb(container.pathItems[j]);
             }
           }
         } catch (e) {}
       }
 
-      function isRectangleLikePath(p, bb, edgeTol, badFrac) {
-        try {
-          if (!p || p.typename !== "PathItem" || !p.closed) return false;
-          var pts = p.pathPoints;
-          if (!pts || pts.length < 4) return false;
-
-          var L = bb[0], T = bb[1], R = bb[2], B = bb[3];
-          var bad = 0;
-
-          for (var i = 0; i < pts.length; i++) {
-            var a = pts[i].anchor;
-            var x = a[0], y = a[1];
-            var d = Math.min(
-              Math.abs(x - L), Math.abs(x - R),
-              Math.abs(y - T), Math.abs(y - B)
-            );
-            if (d > edgeTol) bad++;
-          }
-          return (bad / pts.length) <= badFrac;
-        } catch (e2) {}
-        return false;
+      function boundsMatch(bb, ref, tol) {
+        return (
+          Math.abs(bb[0] - ref[0]) <= tol &&
+          Math.abs(bb[1] - ref[1]) <= tol &&
+          Math.abs(bb[2] - ref[2]) <= tol &&
+          Math.abs(bb[3] - ref[3]) <= tol
+        );
       }
 
-      var rects = [];
-      var targetArea = rectArea(targetBounds);
+      // Use targetBounds (the cropped PNG rect in tmp coords) as the reference.
+      var refB = targetBounds;
+      var tolEdge = 20.0;
 
-      walkGroup(allG, function (it) {
+      // Collect containers first (removing container removes its children too)
+      var kill = [];
+
+      walkAny(allG, function (it) {
         try {
-          if (!it || it.typename !== "PathItem") return;
-          if (!it.closed) return;
+          if (!it) return;
+
+          var tn = it.typename;
+          if (tn !== "GroupItem" && tn !== "CompoundPathItem" && tn !== "PathItem") return;
 
           var bb = getBounds(it);
           if (!bb) return;
 
-          // ignore tiny junk
-          if (rectArea(bb) < targetArea * 0.10) return;
-          // Deterministic kill: remove any path whose bounds match the placed PNG bounds (crop/frame)
-          var tolEdge = 12.0;
-          var refB = (placedB && placedB.length === 4) ? placedB : targetBounds;
-
-          var isFrameByBounds =
-            Math.abs(bb[0] - refB[0]) <= tolEdge &&
-            Math.abs(bb[1] - refB[1]) <= tolEdge &&
-            Math.abs(bb[2] - refB[2]) <= tolEdge &&
-            Math.abs(bb[3] - refB[3]) <= tolEdge;
-
-          if (isFrameByBounds) {
-            rects.push(it);
-            return;
+          if (boundsMatch(bb, refB, tolEdge)) {
+            kill.push(it);
           }
-
-          if (isRectangleLikePath(it, bb, 2.5, 0.06)) {
-            rects.push(it);
-          }
-        } catch (e3) {}
+        } catch (e2) {}
       });
 
-      for (var r = 0; r < rects.length; r++) {
-        try { rects[r].remove(); } catch (e4) {}
+      // Remove in reverse order to avoid iterator problems
+      for (var k = kill.length - 1; k >= 0; k--) {
+        try { kill[k].remove(); } catch (e3) {}
       }
-
-      // ---------- END REGISTER + REMOVE ----------
 
   
       // Style expanded vector to stroke-only (outline)

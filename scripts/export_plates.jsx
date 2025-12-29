@@ -803,9 +803,21 @@
       var desiredL = exportRectPt[0] + dx;
       var desiredB = exportRectPt[3] + dy; // bottom edge in tmp coords
 
-      placed.left = desiredL;
-    placed.top  = desiredB + placed.height;
+      // Use bounds-based translate for more reliable positioning
+      var pb = null;
+      try { pb = placed.geometricBounds; } catch (e2) {}
+      if (pb && pb.length === 4) {
+        var tdx = desiredL - pb[0];
+        var tdy = (desiredB + placed.height) - pb[1]; // top = bottom + height
+        try { placed.translate(tdx, tdy); } catch (e3) {}
+      } else {
+        // fallback if bounds unavailable
+        placed.left = desiredL;
+        placed.top  = desiredB + placed.height;
+      }
       try { app.redraw(); } catch (e4) {}
+      var placedB = null;
+      try { placedB = placed.geometricBounds; } catch (ePB) {}
   
       tmp.activate();
   
@@ -850,54 +862,104 @@
   
       app.redraw();
 
-      // Remove crop-border rectangle created by tracing the raster bounds.
-      // Match by center+size (more stable than exact edges).
-      var desiredL = exportRectPt[0] + dx;
-      var desiredT = exportRectPt[1] + dy;
-      var desiredW = rectW(exportRectPt);
-      var desiredH = rectH(exportRectPt);
-      var desiredCx = desiredL + desiredW * 0.5;
-      var desiredCy = desiredT - desiredH * 0.5;
+      // Remove rectangular "frame" paths from traced output (crop-border, full-frame, inset frames)
+      // Search within expandedGroup so we don't match unrelated document paths.
+      if (expandedGroup) {
+        var tolEdge = 20.0; // pts
+        var tolInset = 20.0; // pts for inset frame detection
 
-      var bestIdx = -1;
-      var bestScore = 1e18;
+        // Compute reference bounds in tmp doc coordinates
+        var cardRectTmp = [
+          cardRectPt[0] + dx,
+          cardRectPt[1] + dy,
+          cardRectPt[2] + dx,
+          cardRectPt[3] + dy
+        ];
 
-      var tolPos = 20.0; // pts
-      var tolSize = 20.0; // pts
+        // expandedGroup can be GroupItem; scan its pageItems recursively
+        function walkGroupItems(container, cb) {
+          try {
+            if (!container || !container.pageItems) return;
+            for (var i = 0; i < container.pageItems.length; i++) {
+              var it = container.pageItems[i];
+              cb(it);
+              if (it.typename === "GroupItem") walkGroupItems(it, cb);
+            }
+          } catch (e) {}
+        }
 
-      for (var pi = 0; pi < tmp.pathItems.length; pi++) {
-        try {
-          var p = tmp.pathItems[pi];
-          if (!p.closed) continue;
-          if (!p.pathPoints || p.pathPoints.length !== 4) continue;
+        var toRemove = [];
 
-          var bb = getBounds(p);
-          if (!bb) continue;
+        walkGroupItems(expandedGroup, function (it) {
+          try {
+            if (it.typename !== "PathItem") return;
+            if (!it.closed) return;
 
-          var w = rectW(bb), h = rectH(bb);
-          var cx = (bb[0] + bb[2]) * 0.5;
-          var cy = (bb[1] + bb[3]) * 0.5;
+            var bb = getBounds(it);
+            if (!bb) return;
 
-          if (Math.abs(cx - desiredCx) > tolPos) continue;
-          if (Math.abs(cy - desiredCy) > tolPos) continue;
-          if (Math.abs(w - desiredW) > tolSize) continue;
-          if (Math.abs(h - desiredH) > tolSize) continue;
+            var w = rectW(bb);
+            var h = rectH(bb);
 
-          // Score by total deviation; pick the closest match
-          var score =
-            Math.abs(cx - desiredCx) +
-            Math.abs(cy - desiredCy) +
-            Math.abs(w - desiredW) +
-            Math.abs(h - desiredH);
+            // Check if rectangle-ish: 4 points OR near-rect by bounds (width/height ratio close to 1:1)
+            var isRectish = false;
+            try {
+              if (it.pathPoints && it.pathPoints.length === 4) {
+                isRectish = true;
+              } else {
+                // Check if bounds aspect ratio is close to rectangular
+                var aspect = Math.max(w, h) / Math.min(w, h);
+                if (aspect < 1.2) isRectish = true; // roughly square/rect
+              }
+            } catch (e) {}
 
-          if (score < bestScore) { bestScore = score; bestIdx = pi; }
-        } catch (e) {}
+            if (!isRectish) return;
+
+            // Check 1: Crop border (placed image bounds)
+            if (placedB && placedB.length === 4) {
+              if (Math.abs(bb[0] - placedB[0]) <= tolEdge &&
+                  Math.abs(bb[1] - placedB[1]) <= tolEdge &&
+                  Math.abs(bb[2] - placedB[2]) <= tolEdge &&
+                  Math.abs(bb[3] - placedB[3]) <= tolEdge) {
+                toRemove.push(it);
+                return;
+              }
+            }
+
+            // Check 2: Full-frame (card rect)
+            if (Math.abs(bb[0] - cardRectTmp[0]) <= tolEdge &&
+                Math.abs(bb[1] - cardRectTmp[1]) <= tolEdge &&
+                Math.abs(bb[2] - cardRectTmp[2]) <= tolEdge &&
+                Math.abs(bb[3] - cardRectTmp[3]) <= tolEdge) {
+              toRemove.push(it);
+              return;
+            }
+
+            // Check 3: Inset frame (within tolInset of card rect edges)
+            var insetL = Math.abs(bb[0] - (cardRectTmp[0] + tolInset));
+            var insetT = Math.abs(bb[1] - (cardRectTmp[1] - tolInset));
+            var insetR = Math.abs(bb[2] - (cardRectTmp[2] - tolInset));
+            var insetB = Math.abs(bb[3] - (cardRectTmp[3] + tolInset));
+            if (insetL <= tolInset && insetT <= tolInset && insetR <= tolInset && insetB <= tolInset) {
+              toRemove.push(it);
+              return;
+            }
+
+            // Check 4: Very large-area rectangles (likely frames/scaffolding)
+            var area = rectArea(bb);
+            var cardArea = rectArea(cardRectTmp);
+            if (area > cardArea * 0.8) { // covers 80%+ of card
+              toRemove.push(it);
+              return;
+            }
+          } catch (e2) {}
+        });
+
+        // Remove all identified frame paths
+        for (var r = 0; r < toRemove.length; r++) {
+          try { toRemove[r].remove(); } catch (e3) {}
+        }
       }
-
-      if (bestIdx >= 0) {
-        try { tmp.pathItems[bestIdx].remove(); } catch (e2) {}
-      }
-
   
       // Style expanded vector to stroke-only (outline)
       function stylePathItem(pi) {
@@ -922,6 +984,9 @@
           } catch (e4) {}
         }
       } catch (e5) {}
+  
+      // Remove the placed raster so it can't affect SVG export
+      try { placed.remove(); } catch (eRm) {}
   
       // Export SVG
       var file = new File(outDir + "/" + svgBaseName + ".svg");

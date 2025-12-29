@@ -464,83 +464,195 @@
   }
 
   function exportDiecutOutlineSVGFromLayer(layer, svgBaseName, cardRectPt) {
-    // Collect candidate items from the diecut layer (including sublayers)
-    var candidates = [];
+    // Collect candidates deterministically:
+    // 1) Prefer clip paths (common AI "clipped mask" structure)
+    // 2) Else prefer filled shapes (mask region)
+    // 3) Else fall back to stroked paths
+    var clips = [];
+    var fills = [];
+    var strokes = [];
+    var sawClippedGroup = false;
+
+    function pushUnique(arr, it) {
+      for (var i = 0; i < arr.length; i++) if (arr[i] === it) return;
+      arr.push(it);
+    }
+
+    function isStrokeOnlyRectNearCard(it, b) {
+      try {
+        if (!it || it.typename !== "PathItem") return false;
+        var isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4;
+        if (!isRectish) return false;
+
+        var strokeOnly = it.stroked && (!it.filled || (it.fillColor && it.fillColor.typename === "NoColor"));
+        if (!strokeOnly) return false;
+
+        var tol = 3.0;
+        var nearAll =
+          Math.abs(b[0] - cardRectPt[0]) <= tol &&
+          Math.abs(b[2] - cardRectPt[2]) <= tol &&
+          Math.abs(b[1] - cardRectPt[1]) <= tol &&
+          Math.abs(b[3] - cardRectPt[3]) <= tol;
+
+        return nearAll;
+      } catch (e) {}
+      return false;
+    }
+
+    function isLargeFilledScaffoldRect(it, b, isClip) {
+      // Only drop near-full-card FILLED rectangles (scaffolding), and never drop the clip path.
+      if (isClip) return false;
+      try {
+        if (!it || it.typename !== "PathItem") return false;
+        var isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4;
+        if (!isRectish) return false;
+
+        var hasFill = it.filled && !(it.fillColor && it.fillColor.typename === "NoColor");
+        if (!hasFill) return false;
+
+        // VERY conservative: basically the whole card
+        return rectArea(b) > rectArea(cardRectPt) * 0.95;
+      } catch (e) {}
+      return false;
+    }
+
+    // ---- PASS 1 (STRICT): drop clipped contents, prefer clip paths ----
     walkLayerItemsDeep(layer, function (it) {
       try { if (it.hidden) return; } catch (e0) {}
 
-      // Only vector shapes
       var tn = "";
       try { tn = it.typename; } catch (e1) {}
+
+      // If we encounter a clipped group, remember it (for fallback), and try to capture its clip path robustly.
+      if (tn === "GroupItem") {
+        try {
+          if (it.clipped) {
+            sawClippedGroup = true;
+
+            // Try to identify the clip path even if some Illustrator builds don't expose .clipping reliably.
+            // Priority: any child PathItem/CompoundPathItem with clipping=true; else first child PathItem; else first CompoundPathItem.
+            var clipCand = null;
+
+            try {
+              // First search children for explicit clipping flag
+              for (var pi = 0; pi < it.pathItems.length; pi++) {
+                if (it.pathItems[pi] && it.pathItems[pi].clipping) { clipCand = it.pathItems[pi]; break; }
+              }
+            } catch (e2) {}
+
+            if (!clipCand) {
+              try {
+                for (var ci = 0; ci < it.compoundPathItems.length; ci++) {
+                  if (it.compoundPathItems[ci] && it.compoundPathItems[ci].clipping) { clipCand = it.compoundPathItems[ci]; break; }
+                }
+              } catch (e3) {}
+            }
+
+            if (!clipCand) {
+              try { if (it.pathItems.length > 0) clipCand = it.pathItems[0]; } catch (e4) {}
+            }
+            if (!clipCand) {
+              try { if (it.compoundPathItems.length > 0) clipCand = it.compoundPathItems[0]; } catch (e5) {}
+            }
+
+            if (clipCand) {
+              var bb = getBounds(clipCand);
+              if (bb) {
+                // Reject candidates that do not meaningfully intersect the card rect
+                var ibb = intersectBounds(bb, cardRectPt);
+                if (!ibb) return;
+                if (rectArea(ibb) < rectArea(bb) * 0.2) return;
+                // Filter obvious guides/frames even for clip candidates
+                if (clipCand.typename === "PathItem" && isLikelyGuideRect(clipCand, bb, cardRectPt)) return;
+                if (clipCand.typename === "PathItem" && isStrokeOnlyRectNearCard(clipCand, bb)) return;
+                pushUnique(clips, clipCand);
+              }
+            }
+          }
+        } catch (eg) {}
+        return;
+      }
+
       if (tn !== "PathItem" && tn !== "CompoundPathItem") return;
 
       var b = getBounds(it);
       if (!b) return;
 
-      // Drop large filled rectangles used as mask scaffolding (common in DIECUT artwork)
-      if (tn === "PathItem") {
-        try {
-          var isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4;
-          var hasFill = it.filled && !(it.fillColor && it.fillColor.typename === "NoColor");
-          if (isRectish && hasFill) {
-            // if it covers most of the card, it's almost certainly scaffolding
-            if (rectArea(b) > rectArea(cardRectPt) * 0.35) return; // tune 0.35~0.8 as needed
-          }
-        } catch (e) {}
-      }
-
-      // Reject candidates that are mostly outside the card rect (prevents off-artboard junk)
+      // Reject candidates that do not meaningfully intersect the card rect
       var ib = intersectBounds(b, cardRectPt);
-      if (!ib) return; // completely outside
-      // If only a tiny intersection, treat as junk
+      if (!ib) return;
       if (rectArea(ib) < rectArea(b) * 0.2) return;
 
-      // Clipping groups: KEEP the clipping path (it IS the outline), drop clipped contents
+      // Clipping groups: KEEP clip path, drop clipped contents
       var isClip = false;
-      try { isClip = !!it.clipping; } catch (e0) {}
+      try { isClip = !!it.clipping; } catch (e6) {}
 
       var parentClipped = false;
-      try { parentClipped = (it.parent && it.parent.typename === "GroupItem" && it.parent.clipped); } catch (e1) {}
+      try { parentClipped = (it.parent && it.parent.typename === "GroupItem" && it.parent.clipped); } catch (e7) {}
 
-      if (parentClipped && !isClip) return; // drop clipped artwork, keep clip path
+      if (parentClipped && !isClip) return; // strict pass: drop clipped artwork
 
-      // Filter out guide rectangles (red borders, etc.)
+      // Drop guide rectangles (red borders / named guides)
       if (tn === "PathItem" && isLikelyGuideRect(it, b, cardRectPt)) return;
 
-      // Drop stroke-only rectangles that are near card bounds on ALL sides (regardless of color)
-      // This catches "mystery frame" rectangles that aren't red or named as guides
-      if (tn === "PathItem") {
-        try {
-          var isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4;
-          if (isRectish && it.stroked && (!it.filled || (it.fillColor && it.fillColor.typename === "NoColor"))) {
-            // if it's within a few points of card bounds on ALL sides, treat as a frame and drop
-            var tol2 = 3.0;
-            var nearAll =
-              Math.abs(b[0] - cardRectPt[0]) <= tol2 &&
-              Math.abs(b[2] - cardRectPt[2]) <= tol2 &&
-              Math.abs(b[1] - cardRectPt[1]) <= tol2 &&
-              Math.abs(b[3] - cardRectPt[3]) <= tol2;
-            if (nearAll) return;
-          }
-        } catch (e) {}
-      }
+      // Drop near-card stroke-only frames regardless of color
+      if (tn === "PathItem" && isStrokeOnlyRectNearCard(it, b)) return;
 
-      // Also skip full-card frames using your existing heuristic when it's clearly a frame
-      // (but ONLY if it's stroked/no-fill; avoid dropping real card-outline diecut)
+      // Classify filled region
+      var hasFill = false;
       try {
-        if (tn === "PathItem") {
-          if (it.stroked && (!it.filled || (it.fillColor && it.fillColor.typename === "NoColor"))) {
-            if (isLikelyFrameItem(it, b, rectW(cardRectPt), rectH(cardRectPt))) {
-              // if it also looks like a guide (red stroke/name), drop it
-              if (isRedStrokeColor(it.strokeColor) || nameLooksGuide(it)) return;
-            }
-          }
-        }
-      } catch (e2) {}
+        hasFill = (tn === "PathItem" && it.filled && !(it.fillColor && it.fillColor.typename === "NoColor"));
+      } catch (e8) {}
 
-      candidates.push(it);
+      // Drop only near-full-card filled scaffold rectangles (conservative) and never drop clip paths
+      if (tn === "PathItem" && isLargeFilledScaffoldRect(it, b, isClip)) return;
+
+      if (isClip) pushUnique(clips, it);
+      else if (hasFill) fills.push(it);
+      else strokes.push(it);
     });
 
+    // If strict pass found nothing but we did see clipped groups, do a relaxed pass:
+    // allow clipped contents (because some files encode the diecut region as clipped content, not the clip path).
+    if (clips.length === 0 && fills.length === 0 && strokes.length === 0 && sawClippedGroup) {
+      walkLayerItemsDeep(layer, function (it) {
+        try { if (it.hidden) return; } catch (e0) {}
+
+        var tn = "";
+        try { tn = it.typename; } catch (e1) {}
+        if (tn !== "PathItem" && tn !== "CompoundPathItem") return;
+
+        var b = getBounds(it);
+        if (!b) return;
+
+        // Reject candidates that do not meaningfully intersect the card rect
+        var ib = intersectBounds(b, cardRectPt);
+        if (!ib) return;
+        if (rectArea(ib) < rectArea(b) * 0.2) return;
+
+        // Keep clip paths if present; otherwise allow clipped contents now.
+        var isClip = false;
+        try { isClip = !!it.clipping; } catch (e2) {}
+
+        // Still drop guides/frames
+        if (tn === "PathItem" && isLikelyGuideRect(it, b, cardRectPt)) return;
+        if (tn === "PathItem" && isStrokeOnlyRectNearCard(it, b)) return;
+
+        var hasFill = false;
+        try {
+          hasFill = (tn === "PathItem" && it.filled && !(it.fillColor && it.fillColor.typename === "NoColor"));
+        } catch (e3) {}
+
+        // Still drop only near-full-card filled scaffold rectangles
+        if (tn === "PathItem" && isLargeFilledScaffoldRect(it, b, isClip)) return;
+
+        if (isClip) pushUnique(clips, it);
+        else if (hasFill) fills.push(it);
+        else strokes.push(it);
+      });
+    }
+
+    var candidates = (clips.length > 0) ? clips : ((fills.length > 0) ? fills : strokes);
     if (candidates.length === 0) return null;
 
     // Create temp document in points with artboard = cardRectPt size
@@ -555,7 +667,7 @@
         tmp.artboards.setActiveArtboardIndex(0);
       } catch (eab) {}
 
-      // Duplicate candidates into tmp active layer (more predictable than document root)
+      // Duplicate candidates into tmp doc (duplicate into active layer, not the document)
       for (var i = 0; i < candidates.length; i++) {
         try {
           candidates[i].duplicate(tmp.activeLayer, ElementPlacement.PLACEATBEGINNING);
@@ -564,8 +676,6 @@
 
       // Group all duplicated items and translate ONCE (prevents double-translation)
       var rootG = tmp.activeLayer.groupItems.add();
-
-      // Move all top-level items in the layer into rootG (iterate backwards)
       for (var mi = tmp.activeLayer.pageItems.length - 1; mi >= 0; mi--) {
         var pit = tmp.activeLayer.pageItems[mi];
         if (pit !== rootG) {
@@ -573,8 +683,7 @@
         }
       }
 
-      // Translate everything so cardRectPt maps to tmp artboard origin
-      // dx = -left, dy maps card top to artboard top
+      // Map cardRect to temp artboard [0..w, 0..h]
       var dx = -cardRectPt[0];
       var dy = hPt - cardRectPt[1]; // map card top -> artboard top
       try { rootG.translate(dx, dy); } catch (et2) {}
@@ -599,12 +708,12 @@
         } catch (e2) {}
       }
 
-      // Pathfinder Unite + Expand only if it can actually do something
+      // Pathfinder Unite + Expand only if there are 2+ selected top-level objects
       var shouldUnite = false;
       try {
         var sel = tmp.selection;
         var selCount = sel ? sel.length : 0;
-        shouldUnite = selCount >= 2;  // KEY: count selected top-level objects
+        shouldUnite = selCount >= 2;
       } catch (e) {}
 
       if (shouldUnite) {
@@ -615,16 +724,14 @@
           app.executeMenuCommand("expandStyle");
           app.executeMenuCommand("ungroup");
           app.executeMenuCommand("ungroup");
-        } catch (e) {
+        } catch (e3) {
           // ignore
         } finally {
           app.userInteractionLevel = oldUIL;
         }
       }
-      // else: No need to pathfinder; just continue to styling/export
 
       // Convert resulting paths to stroke-only outline
-      // (handle PathItem + CompoundPathItem)
       function stylePathItem(pi) {
         try { pi.filled = false; } catch (e0) {}
         try { pi.stroked = true; } catch (e1) {}
@@ -642,7 +749,6 @@
       for (var cp = 0; cp < tmp.compoundPathItems.length; cp++) {
         try {
           var cpi = tmp.compoundPathItems[cp];
-          // compoundPathItems contain pathItems children
           for (var k = 0; k < cpi.pathItems.length; k++) stylePathItem(cpi.pathItems[k]);
         } catch (e6) {}
       }
@@ -650,7 +756,7 @@
       // Export SVG
       var file = new File(outDir + "/" + svgBaseName + ".svg");
       var opts = new ExportOptionsSVG();
-      opts.embedRasterImages = false; // critical: keep it small/clean
+      opts.embedRasterImages = false; // critical
       opts.coordinatePrecision = 3;
       opts.fontSubsetting = SVGFontSubsetting.GLYPHSUSED;
       tmp.exportFile(file, ExportType.SVG, opts);
@@ -660,6 +766,123 @@
       try { tmp.close(SaveOptions.DONOTSAVECHANGES); } catch (eclose) {}
     }
   }
+
+  /**
+   * Fallback: generate diecut outline SVG from PNG mask via Image Trace.
+   * Used when vector candidates are empty (raster-only, placed items, etc.).
+   */
+  function exportDiecutOutlineSVGFromMaskPNG(pngFilename, svgBaseName, cardRectPt, exportRectPt) {
+    var wPt = rectW(cardRectPt);
+    var hPt = rectH(cardRectPt);
+  
+    var pngFile = new File(outDir + "/" + pngFilename);
+    if (!pngFile.exists) return null;
+  
+    var tmp = app.documents.add(DocumentColorSpace.RGB, wPt, hPt);
+    try {
+      // Artboard: [left, top, right, bottom]
+      try {
+        tmp.artboards[0].artboardRect = [0, hPt, wPt, 0];
+        tmp.artboards.setActiveArtboardIndex(0);
+      } catch (eab) {}
+  
+      // Place the CROPPED PNG at the correct position in CARD space
+      // Use the same transform used elsewhere: (x', y') = (x + dx, y + dy)
+      var dx = -cardRectPt[0];
+      var dy = hPt - cardRectPt[1];
+  
+      var placed = tmp.placedItems.add();
+      placed.file = pngFile;
+  
+      // Position uses [left, top]
+      placed.left = exportRectPt[0] + dx;
+      placed.top  = exportRectPt[1] + dy;
+  
+      // Force size to match the crop rect in points
+      placed.width  = rectW(exportRectPt);
+      placed.height = rectH(exportRectPt);
+  
+      tmp.activate();
+  
+      // --- TRACE via DOM (Illustrator scripting) ---
+      // PlacedItem.trace() produces a PluginItem with .tracing (TracingObject). :contentReference[oaicite:2]{index=2}
+      var pluginItem = placed.trace();
+  
+      // Tracing is asynchronous; force completion before touching tracing results/options. :contentReference[oaicite:3]{index=3}
+      app.redraw();
+  
+      var tr = pluginItem.tracing;
+      var opt = tr.tracingOptions;
+  
+      // Configure for a black/white mask: keep black regions, ignore white. :contentReference[oaicite:4]{index=4}
+      opt.tracingMode = TracingModeType.TRACINGMODEBLACKANDWHITE;
+      opt.fills = true;
+      opt.strokes = false;
+      opt.ignoreWhite = true;
+  
+      // Tight fit, low noise; mask is high-contrast, so keep it crisp.
+      opt.threshold = 128;       // 0..255 :contentReference[oaicite:5]{index=5}
+      opt.pathFitting = 0.5;     // 0..10 (lower = tighter) :contentReference[oaicite:6]{index=6}
+      opt.cornerAngle = 20;      // 0..180 :contentReference[oaicite:7]{index=7}
+      opt.minArea = 1;           // smallest feature in sq pixels :contentReference[oaicite:8]{index=8}
+      opt.preprocessBlur = 0.0;  // 0..2 :contentReference[oaicite:9]{index=9}
+  
+      // IMPORTANT: do NOT leave livePaintOutput enabled; docs warn it can cause unexpected behavior. :contentReference[oaicite:10]{index=10}
+      opt.livePaintOutput = false;
+  
+      // Apply options and force retrace completion
+      app.redraw();
+  
+      // Expand tracing to paths (Illustrator DOM v29 exposes expandTracing(viewed)). :contentReference[oaicite:11]{index=11}
+      // Some builds return GroupItem; tracing object is deleted after expansion.
+      var expandedGroup = null;
+      try {
+        expandedGroup = tr.expandTracing(false);
+      } catch (eExp) {
+        // If expandTracing is unavailable in your build, we cannot safely proceed.
+        return null;
+      }
+  
+      app.redraw();
+  
+      // Style expanded vector to stroke-only (outline)
+      function stylePathItem(pi) {
+        try { pi.filled = false; } catch (e0) {}
+        try { pi.stroked = true; } catch (e1) {}
+        try { pi.strokeWidth = 1; } catch (e2) {}
+        try {
+          var c = new RGBColor();
+          c.red = 0; c.green = 0; c.blue = 0;
+          pi.strokeColor = c;
+        } catch (e3) {}
+      }
+  
+      try {
+        // expandedGroup may contain nested items
+        var paths = tmp.pathItems;
+        for (var i = 0; i < paths.length; i++) stylePathItem(paths[i]);
+        var cps = tmp.compoundPathItems;
+        for (var j = 0; j < cps.length; j++) {
+          try {
+            for (var k = 0; k < cps[j].pathItems.length; k++) stylePathItem(cps[j].pathItems[k]);
+          } catch (e4) {}
+        }
+      } catch (e5) {}
+  
+      // Export SVG
+      var file = new File(outDir + "/" + svgBaseName + ".svg");
+      var opts = new ExportOptionsSVG();
+      opts.embedRasterImages = false;
+      opts.coordinatePrecision = 3;
+      opts.fontSubsetting = SVGFontSubsetting.GLYPHSUSED;
+  
+      tmp.exportFile(file, ExportType.SVG, opts);
+      return svgBaseName + ".svg";
+    } finally {
+      try { tmp.close(SaveOptions.DONOTSAVECHANGES); } catch (eclose) {}
+    }
+  }
+  
 
   // =========================
   // Layer naming / grouping
@@ -1056,7 +1279,10 @@
             // Export a clean outline SVG in full card coordinate space
             var svgBase = outName; // Use same base name as PNG (includes "_mask")
             var svgFile = exportDiecutOutlineSVGFromLayer(layer, svgBase, cardRectPt);
-            if (!svgFile) throw new Error("Diecut SVG export failed: no candidates for " + layer.name);
+            if (!svgFile) {
+              svgFile = exportDiecutOutlineSVGFromMaskPNG(outName + ".png", svgBase, cardRectPt, exportRectPt);
+            }
+            if (!svgFile) throw new Error("Diecut SVG export failed: " + layer.name);
             assets = { svg: svgFile };
           }
 

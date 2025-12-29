@@ -793,15 +793,29 @@
   
       var placed = tmp.placedItems.add();
       placed.file = pngFile;
-  
-      // Force size first (Illustrator can shift position when you change width/height)
+
+      // --- Place cropped PNG deterministically (bounds-based translate) ---
       placed.width  = rectW(exportRectPt);
       placed.height = rectH(exportRectPt);
       try { app.redraw(); } catch (e) {}
 
-      // Then position (left/top is stable after sizing)
-      placed.left = exportRectPt[0] + dx;
-      placed.top  = exportRectPt[1] + dy;
+      // Desired placement in tmp doc coordinates (align by LEFT + BOTTOM, more stable)
+      var desiredL = exportRectPt[0] + dx;
+      var desiredB = exportRectPt[3] + dy; // bottom edge in tmp coords
+
+      var pb = null;
+      try { pb = placed.geometricBounds; } catch (e2) {}
+      if (pb && pb.length === 4) {
+        // pb = [L, T, R, B]
+        var tdx = desiredL - pb[0];
+        var tdy = desiredB - pb[3];
+        try { placed.translate(tdx, tdy); } catch (e3) {}
+      } else {
+        // fallback: compute top from bottom + height
+        placed.left = desiredL;
+        placed.top  = desiredB + placed.height;
+      }
+      try { app.redraw(); } catch (e4) {}
   
       tmp.activate();
   
@@ -846,36 +860,52 @@
   
       app.redraw();
 
-      // Remove the "crop border" contour that comes from tracing a cropped PNG.
-      // Expected placed rect in tmp doc coordinates:
-      var expRect = [
-        exportRectPt[0] + dx,
-        exportRectPt[1] + dy,
-        exportRectPt[2] + dx,
-        exportRectPt[3] + dy
-      ];
+      // Remove crop-border rectangle created by tracing the raster bounds.
+      // Match by center+size (more stable than exact edges).
+      var desiredL = exportRectPt[0] + dx;
+      var desiredT = exportRectPt[1] + dy;
+      var desiredW = rectW(exportRectPt);
+      var desiredH = rectH(exportRectPt);
+      var desiredCx = desiredL + desiredW * 0.5;
+      var desiredCy = desiredT - desiredH * 0.5;
 
-      function approxRect(a, b, tol) {
-        return (
-          Math.abs(a[0] - b[0]) <= tol &&
-          Math.abs(a[1] - b[1]) <= tol &&
-          Math.abs(a[2] - b[2]) <= tol &&
-          Math.abs(a[3] - b[3]) <= tol
-        );
-      }
+      var bestIdx = -1;
+      var bestScore = 1e18;
 
-      var tolPt = 6.0;
-      for (var pi = tmp.pathItems.length - 1; pi >= 0; pi--) {
+      var tolPos = 20.0; // pts
+      var tolSize = 20.0; // pts
+
+      for (var pi = 0; pi < tmp.pathItems.length; pi++) {
         try {
           var p = tmp.pathItems[pi];
           if (!p.closed) continue;
-          if (!p.pathPoints || p.pathPoints.length !== 4) continue; // rect-ish
+          if (!p.pathPoints || p.pathPoints.length !== 4) continue;
+
           var bb = getBounds(p);
           if (!bb) continue;
-          if (approxRect(bb, expRect, tolPt)) {
-            p.remove(); // this is the crop-border rectangle
-          }
+
+          var w = rectW(bb), h = rectH(bb);
+          var cx = (bb[0] + bb[2]) * 0.5;
+          var cy = (bb[1] + bb[3]) * 0.5;
+
+          if (Math.abs(cx - desiredCx) > tolPos) continue;
+          if (Math.abs(cy - desiredCy) > tolPos) continue;
+          if (Math.abs(w - desiredW) > tolSize) continue;
+          if (Math.abs(h - desiredH) > tolSize) continue;
+
+          // Score by total deviation; pick the closest match
+          var score =
+            Math.abs(cx - desiredCx) +
+            Math.abs(cy - desiredCy) +
+            Math.abs(w - desiredW) +
+            Math.abs(h - desiredH);
+
+          if (score < bestScore) { bestScore = score; bestIdx = pi; }
         } catch (e) {}
+      }
+
+      if (bestIdx >= 0) {
+        try { tmp.pathItems[bestIdx].remove(); } catch (e2) {}
       }
 
   

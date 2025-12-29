@@ -794,13 +794,14 @@
       var placed = tmp.placedItems.add();
       placed.file = pngFile;
   
-      // Position uses [left, top]
-      placed.left = exportRectPt[0] + dx;
-      placed.top  = exportRectPt[1] + dy;
-  
-      // Force size to match the crop rect in points
+      // Force size first (Illustrator can shift position when you change width/height)
       placed.width  = rectW(exportRectPt);
       placed.height = rectH(exportRectPt);
+      try { app.redraw(); } catch (e) {}
+
+      // Then position (left/top is stable after sizing)
+      placed.left = exportRectPt[0] + dx;
+      placed.top  = exportRectPt[1] + dy;
   
       tmp.activate();
   
@@ -844,6 +845,39 @@
       }
   
       app.redraw();
+
+      // Remove the "crop border" contour that comes from tracing a cropped PNG.
+      // Expected placed rect in tmp doc coordinates:
+      var expRect = [
+        exportRectPt[0] + dx,
+        exportRectPt[1] + dy,
+        exportRectPt[2] + dx,
+        exportRectPt[3] + dy
+      ];
+
+      function approxRect(a, b, tol) {
+        return (
+          Math.abs(a[0] - b[0]) <= tol &&
+          Math.abs(a[1] - b[1]) <= tol &&
+          Math.abs(a[2] - b[2]) <= tol &&
+          Math.abs(a[3] - b[3]) <= tol
+        );
+      }
+
+      var tolPt = 6.0;
+      for (var pi = tmp.pathItems.length - 1; pi >= 0; pi--) {
+        try {
+          var p = tmp.pathItems[pi];
+          if (!p.closed) continue;
+          if (!p.pathPoints || p.pathPoints.length !== 4) continue; // rect-ish
+          var bb = getBounds(p);
+          if (!bb) continue;
+          if (approxRect(bb, expRect, tolPt)) {
+            p.remove(); // this is the crop-border rectangle
+          }
+        } catch (e) {}
+      }
+
   
       // Style expanded vector to stroke-only (outline)
       function stylePathItem(pi) {

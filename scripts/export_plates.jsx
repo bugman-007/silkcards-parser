@@ -918,6 +918,38 @@
         }
       }
 
+      // 2.5) NORMALIZE: fix "one-artboard-height" Y wrap that can happen after expandTracing()
+      // Some expanded paths end up at y - hPt (exactly one card height down).
+      function normalizeItemToArtboardY(it, hPt) {
+        var bb = getBounds(it);
+        if (!bb) return;
+
+        // Artboard in tmp doc is y in [0..hPt]
+        // If the entire item is below the artboard, shift it up by N*hPt
+        if (bb[1] < 0 && bb[3] < 0) {
+          var nUp = Math.ceil((-bb[1]) / hPt); // bring top >= 0
+          try { it.translate(0, nUp * hPt); } catch (e) {}
+          return;
+        }
+
+        // If the entire item is above the artboard, shift it down by N*hPt
+        if (bb[1] > hPt && bb[3] > hPt) {
+          var nDown = Math.ceil((bb[3] - hPt) / hPt); // bring bottom <= hPt
+          try { it.translate(0, -nDown * hPt); } catch (e2) {}
+          return;
+        }
+      }
+
+      // Apply normalization to each direct child of allG (keep it simple + safe)
+      try {
+        if (allG && allG.pageItems) {
+          for (var ni = 0; ni < allG.pageItems.length; ni++) {
+            normalizeItemToArtboardY(allG.pageItems[ni], hPt);
+          }
+          app.redraw();
+        }
+      } catch (eN) {}
+
       // 3) REMOVE rectangle-like paths (crop border + frame rectangles)
       // Works even if tracing created many points.
       function walkGroup(container, cb) {

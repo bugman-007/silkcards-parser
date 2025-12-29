@@ -879,6 +879,7 @@
 
       // 0) Remove live tracing container if it still exists (avoid it polluting bounds)
       try { pluginItem.remove(); } catch (ePI) {}
+      app.redraw();
 
       // 1) GROUP ALL VECTOR OUTPUT (not just expandedGroup)
       // Illustrator may leave expanded items outside expandedGroup.
@@ -893,15 +894,53 @@
         if (pit.typename === "PluginItem") continue;
         try { pit.moveToBeginning(allG); } catch (eMv) {}
       }
+      app.redraw(); // Force bounds update after grouping
 
+      // Check if allG has any content
+      var hasContent = false;
+      try { hasContent = allG && allG.pageItems && allG.pageItems.length > 0; } catch (eHC) {}
+      
       // 2) REGISTER: translate the whole vector output so it aligns to targetBounds
-      var vb = getBounds(allG);
-      if (vb) {
-        // Align left+top to targetBounds left+top
-        var tdx = targetBounds[0] - vb[0];
-        var tdy = targetBounds[1] - vb[1];
-        try { allG.translate(tdx, tdy); } catch (eReg) {}
-        app.redraw();
+      // The traced content should be at the PNG's location, but expandTracing() 
+      // sometimes creates paths at an offset location (often one card height off).
+      if (hasContent) {
+        var vb = getBounds(allG);
+        if (vb && vb.length === 4) {
+          // Standard alignment: move traced content to targetBounds
+          var tdx = targetBounds[0] - vb[0];
+          var tdy = targetBounds[1] - vb[1];
+          
+          if (Math.abs(tdx) > 0.5 || Math.abs(tdy) > 0.5) {
+            try { allG.translate(tdx, tdy); } catch (eReg) {}
+            app.redraw();
+          }
+          
+          // CRITICAL: Re-check bounds after translation
+          // If content is still outside artboard, force correction
+          var vb2 = getBounds(allG);
+          if (vb2 && vb2.length === 4) {
+            // Artboard is [0, hPt, wPt, 0] - content should be within Y=0 to Y=hPt
+            // If content top (vb2[1]) is at or below 0, content is below artboard
+            
+            if (vb2[1] <= 0) {
+              // Content is entirely below artboard - this is the "one card height off" case
+              // Force it to align with targetBounds
+              var forceTdy = targetBounds[1] - vb2[1];
+              if (Math.abs(forceTdy) > 0.5) {
+                try { allG.translate(0, forceTdy); } catch (eForce) {}
+                app.redraw();
+              }
+            } else if (vb2[3] < -hPt * 0.1) {
+              // Content extends significantly below artboard bottom
+              // Shift up so bottom is at Y=0
+              var forceTdy = -vb2[3];
+              if (Math.abs(forceTdy) > 0.5) {
+                try { allG.translate(0, forceTdy); } catch (eForce) {}
+                app.redraw();
+              }
+            }
+          }
+        }
       }
 
       // 3) REMOVE rectangle-like paths (crop border + frame rectangles)

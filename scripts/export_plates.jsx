@@ -803,18 +803,8 @@
       var desiredL = exportRectPt[0] + dx;
       var desiredB = exportRectPt[3] + dy; // bottom edge in tmp coords
 
-      var pb = null;
-      try { pb = placed.geometricBounds; } catch (e2) {}
-      if (pb && pb.length === 4) {
-        // pb = [L, T, R, B]
-        var tdx = desiredL - pb[0];
-        var tdy = desiredB - pb[3];
-        try { placed.translate(tdx, tdy); } catch (e3) {}
-      } else {
-        // fallback: compute top from bottom + height
-        placed.left = desiredL;
-        placed.top  = desiredB + placed.height;
-      }
+      placed.left = desiredL;
+    placed.top  = desiredB + placed.height;
       try { app.redraw(); } catch (e4) {}
   
       tmp.activate();

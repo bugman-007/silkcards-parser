@@ -827,6 +827,10 @@
   
       // Tracing is asynchronous; force completion before touching tracing results/options. :contentReference[oaicite:3]{index=3}
       app.redraw();
+
+      // Bounds of the live tracing object (this is the correct registration anchor)
+      var traceB = null;
+      try { traceB = pluginItem.geometricBounds; } catch (eTB) {}
   
       var tr = pluginItem.tracing;
       var opt = tr.tracingOptions;
@@ -863,152 +867,85 @@
   
       app.redraw();
 
-      // ---------- REGISTER + REMOVE BORDER/FRAMES (deterministic) ----------
-      // Use crop-border rectangle as registration anchor, then remove it
-      function walkGroupItems(container, cb) {
-        try {
-          if (!container) return;
+      // ---------- REGISTER + REMOVE RECTANGLES (robust) ----------
 
-          // If it's a path-like item, callback it
-          if (container.typename === "PathItem" || container.typename === "CompoundPathItem") {
-            cb(container);
-          }
-
-          // Recurse groups
-          if (container.pageItems) {
-            for (var i = 0; i < container.pageItems.length; i++) {
-              var it = container.pageItems[i];
-              cb(it);
-              if (it.typename === "GroupItem") walkGroupItems(it, cb);
-            }
-          }
-        } catch (e) {}
-      }
-
-      function boundsScore(a, b) {
-        // smaller is better
-        return (
-          Math.abs(a[0] - b[0]) +
-          Math.abs(a[1] - b[1]) +
-          Math.abs(a[2] - b[2]) +
-          Math.abs(a[3] - b[3])
-        );
-      }
-
-      // Calculate the CORRECT target position for PNG content in tmp doc coordinates
-      // This is independent of where the PNG was actually placed (placedB might be wrong)
+      // Calculate the target bounds for reference (where PNG content should be in tmp doc)
       var targetBounds = [
         exportRectPt[0] + dx,  // left
         exportRectPt[1] + dy,  // top
         exportRectPt[2] + dx,  // right
         exportRectPt[3] + dy   // bottom
       ];
-      var targetArea = rectArea(targetBounds);
 
-      var borderItem = null;
-      var borderBounds = null;
+      // 1) REGISTER: align expanded vectors to the tracing object's bounds (stable)
+      if (expandedGroup && traceB && traceB.length === 4) {
+        var expB = getBounds(expandedGroup);
+        if (expB) {
+          // Align left + top
+          var tdx = traceB[0] - expB[0];
+          var tdy = traceB[1] - expB[1];
+          try { expandedGroup.translate(tdx, tdy); } catch (eReg) {}
+          app.redraw();
+        }
+      }
 
+      // 2) REMOVE: delete rectangle-like frame/border paths (even if traced with many points)
+      function walkGroupItems(container, cb) {
+        try {
+          if (!container || !container.pageItems) return;
+          for (var i = 0; i < container.pageItems.length; i++) {
+            var it = container.pageItems[i];
+            cb(it);
+            if (it.typename === "GroupItem") walkGroupItems(it, cb);
+          }
+        } catch (e) {}
+      }
+
+      // returns true if most points lie near the bbox edges (rectangle / frame)
+      function isRectangleLikePath(p, bb, edgeTol, badFrac) {
+        try {
+          if (!p || p.typename !== "PathItem" || !p.closed) return false;
+          var pts = p.pathPoints;
+          if (!pts || pts.length < 4) return false;
+
+          var L = bb[0], T = bb[1], R = bb[2], B = bb[3];
+          var bad = 0;
+
+          for (var i = 0; i < pts.length; i++) {
+            var a = pts[i].anchor; // [x,y]
+            var x = a[0], y = a[1];
+            var d = Math.min(Math.abs(x - L), Math.abs(x - R), Math.abs(y - T), Math.abs(y - B));
+            if (d > edgeTol) bad++;
+          }
+
+          return (bad / pts.length) <= badFrac;
+        } catch (e) {}
+        return false;
+      }
+
+      var rectsToRemove = [];
       if (expandedGroup) {
-        // Find the LARGEST closed path - this is most likely the crop border
-        var largestArea = 0;
-
         walkGroupItems(expandedGroup, function (it) {
           try {
-            if (it.typename === "PathItem") {
-              if (!it.closed) return;
-              var bb = getBounds(it);
-              if (!bb) return;
+            if (it.typename !== "PathItem") return;
+            if (!it.closed) return;
 
-              var area = rectArea(bb);
-              // Must be reasonably large (at least 50% of target area)
-              if (area < targetArea * 0.5) return;
+            var bb = getBounds(it);
+            if (!bb) return;
 
-              if (area > largestArea) {
-                largestArea = area;
-                borderItem = it;
-                borderBounds = bb;
-              }
-              return;
-            }
+            // Only consider large-ish shapes (prevents deleting tiny details)
+            var a = rectArea(bb);
+            if (a < rectArea(targetBounds) * 0.15) return;
 
-            if (it.typename === "CompoundPathItem") {
-              var bb2 = getBounds(it);
-              if (!bb2) return;
-
-              var area2 = rectArea(bb2);
-              if (area2 < targetArea * 0.5) return;
-
-              if (area2 > largestArea) {
-                largestArea = area2;
-                borderItem = it;
-                borderBounds = bb2;
-              }
+            // Rectangle-like if points hug the bbox edges
+            if (isRectangleLikePath(it, bb, 2.5, 0.06)) {
+              rectsToRemove.push(it);
             }
           } catch (e2) {}
         });
 
-        // 1) REGISTER: translate expandedGroup so traced crop-border aligns to CORRECT target position
-        if (borderBounds) {
-          var tdx = targetBounds[0] - borderBounds[0]; // align left
-          var tdy = targetBounds[1] - borderBounds[1]; // align top
-          try { expandedGroup.translate(tdx, tdy); } catch (eT) {}
-          app.redraw();
-        }
-
-        // 2) REMOVE: delete the crop-border rectangle
-        // Re-find it after translation since reference might be stale
-        var toRemoveBorder = [];
-        walkGroupItems(expandedGroup, function (it) {
-          try {
-            if (it.typename !== "PathItem" && it.typename !== "CompoundPathItem") return;
-            if (it.typename === "PathItem" && !it.closed) return;
-
-            var bb = getBounds(it);
-            if (!bb) return;
-
-            // Check if bounds closely match targetBounds (the crop border after translation)
-            var matchTol = 15.0;
-            if (Math.abs(bb[0] - targetBounds[0]) <= matchTol &&
-                Math.abs(bb[1] - targetBounds[1]) <= matchTol &&
-                Math.abs(bb[2] - targetBounds[2]) <= matchTol &&
-                Math.abs(bb[3] - targetBounds[3]) <= matchTol) {
-              toRemoveBorder.push(it);
-            }
-          } catch (e3) {}
-        });
-
-        for (var rb = 0; rb < toRemoveBorder.length; rb++) {
-          try { toRemoveBorder[rb].remove(); } catch (eRB) {}
-        }
-
-        // 3) Remove any remaining "full-card frame" rectangles
-        // Card rect in tmp coordinates is always [0, hPt, wPt, 0]
-        var cardRectTmp = [0, hPt, wPt, 0];
-        var cardArea = rectArea(cardRectTmp);
-        var tol = 12.0;
-
-        var kill = [];
-        walkGroupItems(expandedGroup, function (it) {
-          try {
-            if (it.typename !== "PathItem" && it.typename !== "CompoundPathItem") return;
-            var bb = getBounds(it);
-            if (!bb) return;
-
-            // Remove huge frame-like shapes near card edges
-            var nearCard =
-              Math.abs(bb[0] - cardRectTmp[0]) <= tol &&
-              Math.abs(bb[1] - cardRectTmp[1]) <= tol &&
-              Math.abs(bb[2] - cardRectTmp[2]) <= tol &&
-              Math.abs(bb[3] - cardRectTmp[3]) <= tol;
-
-            if (nearCard || rectArea(bb) > cardArea * 0.85) {
-              kill.push(it);
-            }
-          } catch (e3) {}
-        });
-
-        for (var kk = 0; kk < kill.length; kk++) {
-          try { kill[kk].remove(); } catch (e4) {}
+        for (var r = 0; r < rectsToRemove.length; r++) {
+          try { rectsToRemove[r].remove(); } catch (e3) {}
         }
       }
       // ---------- END REGISTER + REMOVE ----------

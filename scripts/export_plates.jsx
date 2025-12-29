@@ -481,31 +481,20 @@
     function isStrokeOnlyRectNearCard(it, b) {
       try {
         if (!it || it.typename !== "PathItem") return false;
-
         var isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4;
         if (!isRectish) return false;
 
         var strokeOnly = it.stroked && (!it.filled || (it.fillColor && it.fillColor.typename === "NoColor"));
         if (!strokeOnly) return false;
 
-        // More forgiving tolerance (frames are often bleed/safe guides)
-        var tol = 12.0;
+        var tol = 3.0;
+        var nearAll =
+          Math.abs(b[0] - cardRectPt[0]) <= tol &&
+          Math.abs(b[2] - cardRectPt[2]) <= tol &&
+          Math.abs(b[1] - cardRectPt[1]) <= tol &&
+          Math.abs(b[3] - cardRectPt[3]) <= tol;
 
-        var L = b[0], T = b[1], R = b[2], B = b[3];
-        var cL = cardRectPt[0], cT = cardRectPt[1], cR = cardRectPt[2], cB = cardRectPt[3];
-
-        var nearEdges =
-          Math.abs(L - cL) <= tol &&
-          Math.abs(R - cR) <= tol &&
-          Math.abs(T - cT) <= tol &&
-          Math.abs(B - cB) <= tol;
-
-        // Also accept "near by size" even if slightly shifted
-        var nearSize =
-          approx(rectW(b), rectW(cardRectPt), 0.02) &&
-          approx(rectH(b), rectH(cardRectPt), 0.02);
-
-        return nearEdges || nearSize;
+        return nearAll;
       } catch (e) {}
       return false;
     }
@@ -698,35 +687,6 @@
       var dx = -cardRectPt[0];
       var dy = hPt - cardRectPt[1]; // map card top -> artboard top
       try { rootG.translate(dx, dy); } catch (et2) {}
-
-      // LAST DEFENSE: remove any stroke-only rectangle that matches the temp artboard
-      function removeArtboardFrameRects(tmpDoc, wPt, hPt) {
-        var ab = [0, hPt, wPt, 0];
-        var tol = 12.0;
-
-        for (var i = tmpDoc.pathItems.length - 1; i >= 0; i--) {
-          var p = tmpDoc.pathItems[i];
-          try {
-            if (!p.closed || !p.pathPoints || p.pathPoints.length !== 4) continue;
-
-            var strokeOnly = p.stroked && (!p.filled || (p.fillColor && p.fillColor.typename === "NoColor"));
-            if (!strokeOnly) continue;
-
-            var bb = getBounds(p);
-            if (!bb) continue;
-
-            var match =
-              Math.abs(bb[0] - ab[0]) <= tol &&
-              Math.abs(bb[1] - ab[1]) <= tol &&
-              Math.abs(bb[2] - ab[2]) <= tol &&
-              Math.abs(bb[3] - ab[3]) <= tol;
-
-            if (match) p.remove();
-          } catch (e) {}
-        }
-      }
-
-      removeArtboardFrameRects(tmp, wPt, hPt);
 
       // IMPORTANT: ensure tmp is active before menu commands
       tmp.activate();
@@ -990,63 +950,86 @@
         }
       } catch (eN) {}
 
-      // 3) REMOVE the crop-border/frame by BOUNDS MATCH (works for PathItem / CompoundPathItem / GroupItem)
-      function walkAny(container, cb) {
+      // 3) REMOVE rectangle-like paths (crop border + frame rectangles)
+      // Works even if tracing created many points.
+      function walkGroup(container, cb) {
         try {
-          if (!container) return;
-          cb(container);
-
-          if (container.pageItems) {
-            for (var i = 0; i < container.pageItems.length; i++) {
-              walkAny(container.pageItems[i], cb);
-            }
-          }
-
-          // CompoundPathItem children are PathItems, but we also want to consider the compound itself
-          if (container.typename === "CompoundPathItem" && container.pathItems) {
-            for (var j = 0; j < container.pathItems.length; j++) {
-              cb(container.pathItems[j]);
+          if (!container || !container.pageItems) return;
+          for (var i = 0; i < container.pageItems.length; i++) {
+            var it = container.pageItems[i];
+            cb(it);
+            if (it.typename === "GroupItem") walkGroup(it, cb);
+            if (it.typename === "CompoundPathItem") {
+              try {
+                for (var j = 0; j < it.pathItems.length; j++) cb(it.pathItems[j]);
+              } catch (eCP) {}
             }
           }
         } catch (e) {}
       }
 
-      function boundsMatch(bb, ref, tol) {
-        return (
-          Math.abs(bb[0] - ref[0]) <= tol &&
-          Math.abs(bb[1] - ref[1]) <= tol &&
-          Math.abs(bb[2] - ref[2]) <= tol &&
-          Math.abs(bb[3] - ref[3]) <= tol
-        );
+      function isRectangleLikePath(p, bb, edgeTol, badFrac) {
+        try {
+          if (!p || p.typename !== "PathItem" || !p.closed) return false;
+          var pts = p.pathPoints;
+          if (!pts || pts.length < 4) return false;
+
+          var L = bb[0], T = bb[1], R = bb[2], B = bb[3];
+          var bad = 0;
+
+          for (var i = 0; i < pts.length; i++) {
+            var a = pts[i].anchor;
+            var x = a[0], y = a[1];
+            var d = Math.min(
+              Math.abs(x - L), Math.abs(x - R),
+              Math.abs(y - T), Math.abs(y - B)
+            );
+            if (d > edgeTol) bad++;
+          }
+          return (bad / pts.length) <= badFrac;
+        } catch (e2) {}
+        return false;
       }
 
-      // Use targetBounds (the cropped PNG rect in tmp coords) as the reference.
-      var refB = targetBounds;
-      var tolEdge = 20.0;
+      var rects = [];
+      var targetArea = rectArea(targetBounds);
 
-      // Collect containers first (removing container removes its children too)
-      var kill = [];
-
-      walkAny(allG, function (it) {
+      walkGroup(allG, function (it) {
         try {
-          if (!it) return;
-
-          var tn = it.typename;
-          if (tn !== "GroupItem" && tn !== "CompoundPathItem" && tn !== "PathItem") return;
+          if (!it || it.typename !== "PathItem") return;
+          if (!it.closed) return;
 
           var bb = getBounds(it);
           if (!bb) return;
 
-          if (boundsMatch(bb, refB, tolEdge)) {
-            kill.push(it);
+          // ignore tiny junk
+          if (rectArea(bb) < targetArea * 0.10) return;
+          // Deterministic kill: remove any path whose bounds match the placed PNG bounds (crop/frame)
+          var tolEdge = 12.0;
+          var refB = (placedB && placedB.length === 4) ? placedB : targetBounds;
+
+          var isFrameByBounds =
+            Math.abs(bb[0] - refB[0]) <= tolEdge &&
+            Math.abs(bb[1] - refB[1]) <= tolEdge &&
+            Math.abs(bb[2] - refB[2]) <= tolEdge &&
+            Math.abs(bb[3] - refB[3]) <= tolEdge;
+
+          if (isFrameByBounds) {
+            rects.push(it);
+            return;
           }
-        } catch (e2) {}
+
+          if (isRectangleLikePath(it, bb, 2.5, 0.06)) {
+            rects.push(it);
+          }
+        } catch (e3) {}
       });
 
-      // Remove in reverse order to avoid iterator problems
-      for (var k = kill.length - 1; k >= 0; k--) {
-        try { kill[k].remove(); } catch (e3) {}
+      for (var r = 0; r < rects.length; r++) {
+        try { rects[r].remove(); } catch (e4) {}
       }
+
+      // ---------- END REGISTER + REMOVE ----------
 
   
       // Style expanded vector to stroke-only (outline)
@@ -1227,27 +1210,6 @@
     return [cx - wPt * 0.5, cy + hPt * 0.5, cx + wPt * 0.5, cy - hPt * 0.5];
   }
 
-  function pickRepresentativeLayer(group) {
-    if (!group || !group.layers || group.layers.length === 0) return null;
-
-    // Prefer PRINT layer because it's usually full-card and stable
-    for (var i = 0; i < group.layers.length; i++) {
-      if (classifyType(group.layers[i].name) === "PRINT") return group.layers[i];
-    }
-    // Otherwise just use the first layer
-    return group.layers[0];
-  }
-
-  function getExactCardRectFromGroup(group, cardW, cardH) {
-    var rep = pickRepresentativeLayer(group);
-    if (!rep) return null;
-
-    // Ensure bounds are valid
-    soloLayer(rep);
-    var found = findLayerCardRect(rep, cardW, cardH);
-    return found;
-  }
-
   function chooseDpiForRect(cardRectPt) {
     var wPt = rectW(cardRectPt),
       hPt = rectH(cardRectPt);
@@ -1312,12 +1274,8 @@
 
     // OPTIONAL: if you have known card size, you can override here via __PARSER_ARGS__.cardWPt / cardHPt
 
-    // Try to find exact card rect from frame rectangles in representative layers
-    var frontExact = getExactCardRectFromGroup(c.sides.front, wPt, hPt);
-    var backExact  = getExactCardRectFromGroup(c.sides.back,  wPt, hPt);
-
-    var frontCardRectPt = frontExact ? frontExact : centerRectAround(frontSeed, wPt, hPt);
-    var backCardRectPt  = backExact  ? backExact  : centerRectAround(backSeed,  wPt, hPt);
+    var frontCardRectPt = centerRectAround(frontSeed, wPt, hPt);
+    var backCardRectPt = centerRectAround(backSeed, wPt, hPt);
 
     // Lock one dpiUsed per index (based on the card size)
     var dpiUsedIndex = chooseDpiForRect(frontCardRectPt);

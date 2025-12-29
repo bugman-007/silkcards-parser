@@ -895,42 +895,51 @@
         );
       }
 
+      // Calculate the CORRECT target position for PNG content in tmp doc coordinates
+      // This is independent of where the PNG was actually placed (placedB might be wrong)
+      var targetBounds = [
+        exportRectPt[0] + dx,  // left
+        exportRectPt[1] + dy,  // top
+        exportRectPt[2] + dx,  // right
+        exportRectPt[3] + dy   // bottom
+      ];
+      var targetArea = rectArea(targetBounds);
+
       var borderItem = null;
       var borderBounds = null;
 
-      if (expandedGroup && placedB && placedB.length === 4) {
-        var bestScore = 1e18;
-        var placedArea = rectArea(placedB);
+      if (expandedGroup) {
+        // Find the LARGEST closed path - this is most likely the crop border
+        var largestArea = 0;
 
         walkGroupItems(expandedGroup, function (it) {
           try {
-            // Evaluate PathItem directly
             if (it.typename === "PathItem") {
               if (!it.closed) return;
               var bb = getBounds(it);
               if (!bb) return;
 
-              // candidate should be "large-ish" (crop border tends to be largest)
-              if (rectArea(bb) < placedArea * 0.5) return;
+              var area = rectArea(bb);
+              // Must be reasonably large (at least 50% of target area)
+              if (area < targetArea * 0.5) return;
 
-              var s = boundsScore(bb, placedB);
-              if (s < bestScore) {
-                bestScore = s;
+              if (area > largestArea) {
+                largestArea = area;
                 borderItem = it;
                 borderBounds = bb;
               }
               return;
             }
 
-            // Evaluate CompoundPathItem by its overall bounds
             if (it.typename === "CompoundPathItem") {
               var bb2 = getBounds(it);
               if (!bb2) return;
-              if (rectArea(bb2) < placedArea * 0.5) return;
 
-              var s2 = boundsScore(bb2, placedB);
-              if (s2 < bestScore) {
-                bestScore = s2;
+              var area2 = rectArea(bb2);
+              if (area2 < targetArea * 0.5) return;
+
+              if (area2 > largestArea) {
+                largestArea = area2;
                 borderItem = it;
                 borderBounds = bb2;
               }
@@ -938,20 +947,41 @@
           } catch (e2) {}
         });
 
-        // 1) REGISTER: translate expandedGroup so traced crop-border aligns to placed image bounds
+        // 1) REGISTER: translate expandedGroup so traced crop-border aligns to CORRECT target position
         if (borderBounds) {
-          var tdx = placedB[0] - borderBounds[0]; // align left
-          var tdy = placedB[1] - borderBounds[1]; // align top
+          var tdx = targetBounds[0] - borderBounds[0]; // align left
+          var tdy = targetBounds[1] - borderBounds[1]; // align top
           try { expandedGroup.translate(tdx, tdy); } catch (eT) {}
           app.redraw();
         }
 
-        // 2) REMOVE: delete the crop-border itself (now that it served as anchor)
-        if (borderItem) {
-          try { borderItem.remove(); } catch (eR) {}
+        // 2) REMOVE: delete the crop-border rectangle
+        // Re-find it after translation since reference might be stale
+        var toRemoveBorder = [];
+        walkGroupItems(expandedGroup, function (it) {
+          try {
+            if (it.typename !== "PathItem" && it.typename !== "CompoundPathItem") return;
+            if (it.typename === "PathItem" && !it.closed) return;
+
+            var bb = getBounds(it);
+            if (!bb) return;
+
+            // Check if bounds closely match targetBounds (the crop border after translation)
+            var matchTol = 15.0;
+            if (Math.abs(bb[0] - targetBounds[0]) <= matchTol &&
+                Math.abs(bb[1] - targetBounds[1]) <= matchTol &&
+                Math.abs(bb[2] - targetBounds[2]) <= matchTol &&
+                Math.abs(bb[3] - targetBounds[3]) <= matchTol) {
+              toRemoveBorder.push(it);
+            }
+          } catch (e3) {}
+        });
+
+        for (var rb = 0; rb < toRemoveBorder.length; rb++) {
+          try { toRemoveBorder[rb].remove(); } catch (eRB) {}
         }
 
-        // 3) OPTIONAL: remove any remaining "full-card frame" rectangles inside traced output
+        // 3) Remove any remaining "full-card frame" rectangles
         // Card rect in tmp coordinates is always [0, hPt, wPt, 0]
         var cardRectTmp = [0, hPt, wPt, 0];
         var cardArea = rectArea(cardRectTmp);

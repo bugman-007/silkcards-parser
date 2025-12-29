@@ -848,6 +848,7 @@
       opt.livePaintOutput = false;
   
       // Apply options and force retrace completion
+      try { tr.retrace(); app.redraw(); } catch (e) {}
       app.redraw();
   
       // Expand tracing to paths (Illustrator DOM v29 exposes expandTracing(viewed)). :contentReference[oaicite:11]{index=11}
@@ -862,104 +863,125 @@
   
       app.redraw();
 
-      // Remove rectangular "frame" paths from traced output (crop-border, full-frame, inset frames)
-      // Search within expandedGroup so we don't match unrelated document paths.
-      if (expandedGroup) {
-        var tolEdge = 20.0; // pts
-        var tolInset = 20.0; // pts for inset frame detection
+      // ---------- REGISTER + REMOVE BORDER/FRAMES (deterministic) ----------
+      // Use crop-border rectangle as registration anchor, then remove it
+      function walkGroupItems(container, cb) {
+        try {
+          if (!container) return;
 
-        // Compute reference bounds in tmp doc coordinates
-        var cardRectTmp = [
-          cardRectPt[0] + dx,
-          cardRectPt[1] + dy,
-          cardRectPt[2] + dx,
-          cardRectPt[3] + dy
-        ];
+          // If it's a path-like item, callback it
+          if (container.typename === "PathItem" || container.typename === "CompoundPathItem") {
+            cb(container);
+          }
 
-        // expandedGroup can be GroupItem; scan its pageItems recursively
-        function walkGroupItems(container, cb) {
-          try {
-            if (!container || !container.pageItems) return;
+          // Recurse groups
+          if (container.pageItems) {
             for (var i = 0; i < container.pageItems.length; i++) {
               var it = container.pageItems[i];
               cb(it);
               if (it.typename === "GroupItem") walkGroupItems(it, cb);
             }
-          } catch (e) {}
-        }
+          }
+        } catch (e) {}
+      }
 
-        var toRemove = [];
+      function boundsScore(a, b) {
+        // smaller is better
+        return (
+          Math.abs(a[0] - b[0]) +
+          Math.abs(a[1] - b[1]) +
+          Math.abs(a[2] - b[2]) +
+          Math.abs(a[3] - b[3])
+        );
+      }
+
+      var borderItem = null;
+      var borderBounds = null;
+
+      if (expandedGroup && placedB && placedB.length === 4) {
+        var bestScore = 1e18;
+        var placedArea = rectArea(placedB);
 
         walkGroupItems(expandedGroup, function (it) {
           try {
-            if (it.typename !== "PathItem") return;
-            if (!it.closed) return;
+            // Evaluate PathItem directly
+            if (it.typename === "PathItem") {
+              if (!it.closed) return;
+              var bb = getBounds(it);
+              if (!bb) return;
 
-            var bb = getBounds(it);
-            if (!bb) return;
+              // candidate should be "large-ish" (crop border tends to be largest)
+              if (rectArea(bb) < placedArea * 0.5) return;
 
-            var w = rectW(bb);
-            var h = rectH(bb);
-
-            // Check if rectangle-ish: 4 points OR near-rect by bounds (width/height ratio close to 1:1)
-            var isRectish = false;
-            try {
-              if (it.pathPoints && it.pathPoints.length === 4) {
-                isRectish = true;
-              } else {
-                // Check if bounds aspect ratio is close to rectangular
-                var aspect = Math.max(w, h) / Math.min(w, h);
-                if (aspect < 1.2) isRectish = true; // roughly square/rect
+              var s = boundsScore(bb, placedB);
+              if (s < bestScore) {
+                bestScore = s;
+                borderItem = it;
+                borderBounds = bb;
               }
-            } catch (e) {}
+              return;
+            }
 
-            if (!isRectish) return;
+            // Evaluate CompoundPathItem by its overall bounds
+            if (it.typename === "CompoundPathItem") {
+              var bb2 = getBounds(it);
+              if (!bb2) return;
+              if (rectArea(bb2) < placedArea * 0.5) return;
 
-            // Check 1: Crop border (placed image bounds)
-            if (placedB && placedB.length === 4) {
-              if (Math.abs(bb[0] - placedB[0]) <= tolEdge &&
-                  Math.abs(bb[1] - placedB[1]) <= tolEdge &&
-                  Math.abs(bb[2] - placedB[2]) <= tolEdge &&
-                  Math.abs(bb[3] - placedB[3]) <= tolEdge) {
-                toRemove.push(it);
-                return;
+              var s2 = boundsScore(bb2, placedB);
+              if (s2 < bestScore) {
+                bestScore = s2;
+                borderItem = it;
+                borderBounds = bb2;
               }
-            }
-
-            // Check 2: Full-frame (card rect)
-            if (Math.abs(bb[0] - cardRectTmp[0]) <= tolEdge &&
-                Math.abs(bb[1] - cardRectTmp[1]) <= tolEdge &&
-                Math.abs(bb[2] - cardRectTmp[2]) <= tolEdge &&
-                Math.abs(bb[3] - cardRectTmp[3]) <= tolEdge) {
-              toRemove.push(it);
-              return;
-            }
-
-            // Check 3: Inset frame (within tolInset of card rect edges)
-            var insetL = Math.abs(bb[0] - (cardRectTmp[0] + tolInset));
-            var insetT = Math.abs(bb[1] - (cardRectTmp[1] - tolInset));
-            var insetR = Math.abs(bb[2] - (cardRectTmp[2] - tolInset));
-            var insetB = Math.abs(bb[3] - (cardRectTmp[3] + tolInset));
-            if (insetL <= tolInset && insetT <= tolInset && insetR <= tolInset && insetB <= tolInset) {
-              toRemove.push(it);
-              return;
-            }
-
-            // Check 4: Very large-area rectangles (likely frames/scaffolding)
-            var area = rectArea(bb);
-            var cardArea = rectArea(cardRectTmp);
-            if (area > cardArea * 0.8) { // covers 80%+ of card
-              toRemove.push(it);
-              return;
             }
           } catch (e2) {}
         });
 
-        // Remove all identified frame paths
-        for (var r = 0; r < toRemove.length; r++) {
-          try { toRemove[r].remove(); } catch (e3) {}
+        // 1) REGISTER: translate expandedGroup so traced crop-border aligns to placed image bounds
+        if (borderBounds) {
+          var tdx = placedB[0] - borderBounds[0]; // align left
+          var tdy = placedB[1] - borderBounds[1]; // align top
+          try { expandedGroup.translate(tdx, tdy); } catch (eT) {}
+          app.redraw();
+        }
+
+        // 2) REMOVE: delete the crop-border itself (now that it served as anchor)
+        if (borderItem) {
+          try { borderItem.remove(); } catch (eR) {}
+        }
+
+        // 3) OPTIONAL: remove any remaining "full-card frame" rectangles inside traced output
+        // Card rect in tmp coordinates is always [0, hPt, wPt, 0]
+        var cardRectTmp = [0, hPt, wPt, 0];
+        var cardArea = rectArea(cardRectTmp);
+        var tol = 12.0;
+
+        var kill = [];
+        walkGroupItems(expandedGroup, function (it) {
+          try {
+            if (it.typename !== "PathItem" && it.typename !== "CompoundPathItem") return;
+            var bb = getBounds(it);
+            if (!bb) return;
+
+            // Remove huge frame-like shapes near card edges
+            var nearCard =
+              Math.abs(bb[0] - cardRectTmp[0]) <= tol &&
+              Math.abs(bb[1] - cardRectTmp[1]) <= tol &&
+              Math.abs(bb[2] - cardRectTmp[2]) <= tol &&
+              Math.abs(bb[3] - cardRectTmp[3]) <= tol;
+
+            if (nearCard || rectArea(bb) > cardArea * 0.85) {
+              kill.push(it);
+            }
+          } catch (e3) {}
+        });
+
+        for (var kk = 0; kk < kill.length; kk++) {
+          try { kill[kk].remove(); } catch (e4) {}
         }
       }
+      // ---------- END REGISTER + REMOVE ----------
   
       // Style expanded vector to stroke-only (outline)
       function stylePathItem(pi) {

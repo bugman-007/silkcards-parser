@@ -827,10 +827,6 @@
   
       // Tracing is asynchronous; force completion before touching tracing results/options. :contentReference[oaicite:3]{index=3}
       app.redraw();
-
-      // Bounds of the live tracing object (this is the correct registration anchor)
-      var traceB = null;
-      try { traceB = pluginItem.geometricBounds; } catch (eTB) {}
   
       var tr = pluginItem.tracing;
       var opt = tr.tracingOptions;
@@ -854,6 +850,10 @@
       // Apply options and force retrace completion
       try { tr.retrace(); app.redraw(); } catch (e) {}
       app.redraw();
+
+      // Capture bounds AFTER retrace (otherwise it's stale)
+      var traceB = null;
+      try { traceB = pluginItem.geometricBounds; } catch (eTB) {}
   
       // Expand tracing to paths (Illustrator DOM v29 exposes expandTracing(viewed)). :contentReference[oaicite:11]{index=11}
       // Some builds return GroupItem; tracing object is deleted after expansion.
@@ -867,9 +867,9 @@
   
       app.redraw();
 
-      // ---------- REGISTER + REMOVE RECTANGLES (robust) ----------
+      // ---------- REGISTER + REMOVE RECTANGLES (robust, WHOLE-DOC) ----------
 
-      // Calculate the target bounds for reference (where PNG content should be in tmp doc)
+      // target bounds in tmp doc coordinates (where the CROPPED PNG lives)
       var targetBounds = [
         exportRectPt[0] + dx,  // left
         exportRectPt[1] + dy,  // top
@@ -877,31 +877,51 @@
         exportRectPt[3] + dy   // bottom
       ];
 
-      // 1) REGISTER: align expanded vectors to the tracing object's bounds (stable)
-      if (expandedGroup && traceB && traceB.length === 4) {
-        var expB = getBounds(expandedGroup);
-        if (expB) {
-          // Align left + top
-          var tdx = traceB[0] - expB[0];
-          var tdy = traceB[1] - expB[1];
-          try { expandedGroup.translate(tdx, tdy); } catch (eReg) {}
-          app.redraw();
-        }
+      // 0) Remove live tracing container if it still exists (avoid it polluting bounds)
+      try { pluginItem.remove(); } catch (ePI) {}
+
+      // 1) GROUP ALL VECTOR OUTPUT (not just expandedGroup)
+      // Illustrator may leave expanded items outside expandedGroup.
+      // We gather everything vector-like in the active layer (excluding PlacedItem).
+      var allG = tmp.activeLayer.groupItems.add();
+
+      for (var mi = tmp.activeLayer.pageItems.length - 1; mi >= 0; mi--) {
+        var pit = tmp.activeLayer.pageItems[mi];
+        if (pit === allG) continue;
+        if (pit.typename === "PlacedItem") continue;
+        // skip any remaining PluginItem just in case
+        if (pit.typename === "PluginItem") continue;
+        try { pit.moveToBeginning(allG); } catch (eMv) {}
       }
 
-      // 2) REMOVE: delete rectangle-like frame/border paths (even if traced with many points)
-      function walkGroupItems(container, cb) {
+      // 2) REGISTER: translate the whole vector output so it aligns to targetBounds
+      var vb = getBounds(allG);
+      if (vb) {
+        // Align left+top to targetBounds left+top
+        var tdx = targetBounds[0] - vb[0];
+        var tdy = targetBounds[1] - vb[1];
+        try { allG.translate(tdx, tdy); } catch (eReg) {}
+        app.redraw();
+      }
+
+      // 3) REMOVE rectangle-like paths (crop border + frame rectangles)
+      // Works even if tracing created many points.
+      function walkGroup(container, cb) {
         try {
           if (!container || !container.pageItems) return;
           for (var i = 0; i < container.pageItems.length; i++) {
             var it = container.pageItems[i];
             cb(it);
-            if (it.typename === "GroupItem") walkGroupItems(it, cb);
+            if (it.typename === "GroupItem") walkGroup(it, cb);
+            if (it.typename === "CompoundPathItem") {
+              try {
+                for (var j = 0; j < it.pathItems.length; j++) cb(it.pathItems[j]);
+              } catch (eCP) {}
+            }
           }
         } catch (e) {}
       }
 
-      // returns true if most points lie near the bbox edges (rectangle / frame)
       function isRectangleLikePath(p, bb, edgeTol, badFrac) {
         try {
           if (!p || p.typename !== "PathItem" || !p.closed) return false;
@@ -912,43 +932,45 @@
           var bad = 0;
 
           for (var i = 0; i < pts.length; i++) {
-            var a = pts[i].anchor; // [x,y]
+            var a = pts[i].anchor;
             var x = a[0], y = a[1];
-            var d = Math.min(Math.abs(x - L), Math.abs(x - R), Math.abs(y - T), Math.abs(y - B));
+            var d = Math.min(
+              Math.abs(x - L), Math.abs(x - R),
+              Math.abs(y - T), Math.abs(y - B)
+            );
             if (d > edgeTol) bad++;
           }
-
           return (bad / pts.length) <= badFrac;
-        } catch (e) {}
+        } catch (e2) {}
         return false;
       }
 
-      var rectsToRemove = [];
-      if (expandedGroup) {
-        walkGroupItems(expandedGroup, function (it) {
-          try {
-            if (it.typename !== "PathItem") return;
-            if (!it.closed) return;
+      var rects = [];
+      var targetArea = rectArea(targetBounds);
 
-            var bb = getBounds(it);
-            if (!bb) return;
+      walkGroup(allG, function (it) {
+        try {
+          if (!it || it.typename !== "PathItem") return;
+          if (!it.closed) return;
 
-            // Only consider large-ish shapes (prevents deleting tiny details)
-            var a = rectArea(bb);
-            if (a < rectArea(targetBounds) * 0.15) return;
+          var bb = getBounds(it);
+          if (!bb) return;
 
-            // Rectangle-like if points hug the bbox edges
-            if (isRectangleLikePath(it, bb, 2.5, 0.06)) {
-              rectsToRemove.push(it);
-            }
-          } catch (e2) {}
-        });
+          // ignore tiny junk
+          if (rectArea(bb) < targetArea * 0.10) return;
 
-        for (var r = 0; r < rectsToRemove.length; r++) {
-          try { rectsToRemove[r].remove(); } catch (e3) {}
-        }
+          if (isRectangleLikePath(it, bb, 2.5, 0.06)) {
+            rects.push(it);
+          }
+        } catch (e3) {}
+      });
+
+      for (var r = 0; r < rects.length; r++) {
+        try { rects[r].remove(); } catch (e4) {}
       }
+
       // ---------- END REGISTER + REMOVE ----------
+
   
       // Style expanded vector to stroke-only (outline)
       function stylePathItem(pi) {

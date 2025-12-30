@@ -463,7 +463,9 @@
     return false;
   }
 
-  function exportDiecutOutlineSVGFromLayer(layer, svgBaseName, cardRectPt) {
+  function exportDiecutOutlineSVGFromLayer(layer, svgBaseName, cardRectPt, svgRectPt) {
+    var mapRectPt = svgRectPt || cardRectPt; // Use crop rect if provided, else fallback to card rect
+    
     // Collect candidates deterministically:
     // 1) Prefer clip paths (common AI "clipped mask" structure)
     // 2) Else prefer filled shapes (mask region)
@@ -655,9 +657,9 @@
     var candidates = (clips.length > 0) ? clips : ((fills.length > 0) ? fills : strokes);
     if (candidates.length === 0) return null;
 
-    // Create temp document in points with artboard = cardRectPt size
-    var wPt = rectW(cardRectPt);
-    var hPt = rectH(cardRectPt);
+    // Create temp document in points with artboard = mapRectPt size (CROP space)
+    var wPt = rectW(mapRectPt);
+    var hPt = rectH(mapRectPt);
 
     var tmp = app.documents.add(DocumentColorSpace.RGB, wPt, hPt);
     try {
@@ -683,9 +685,9 @@
         }
       }
 
-      // Map cardRect to temp artboard [0..w, 0..h]
-      var dx = -cardRectPt[0];
-      var dy = hPt - cardRectPt[1]; // map card top -> artboard top
+      // Map mapRectPt to temp artboard [0..w, 0..h]
+      var dx = -mapRectPt[0];
+      var dy = hPt - mapRectPt[1];
       try { rootG.translate(dx, dy); } catch (et2) {}
 
       // IMPORTANT: ensure tmp is active before menu commands
@@ -771,293 +773,98 @@
    * Fallback: generate diecut outline SVG from PNG mask via Image Trace.
    * Used when vector candidates are empty (raster-only, placed items, etc.).
    */
-  function exportDiecutOutlineSVGFromMaskPNG(pngFilename, svgBaseName, cardRectPt, exportRectPt) {
-    var wPt = rectW(cardRectPt);
-    var hPt = rectH(cardRectPt);
-  
+  function exportDiecutOutlineSVGFromMaskPNG(pngFilename, svgBaseName, svgRectPt) {
     var pngFile = new File(outDir + "/" + pngFilename);
     if (!pngFile.exists) return null;
   
+    var wPt = rectW(svgRectPt);
+    var hPt = rectH(svgRectPt);
+  
     var tmp = app.documents.add(DocumentColorSpace.RGB, wPt, hPt);
     try {
-      // Artboard: [left, top, right, bottom]
-      try {
-        tmp.artboards[0].artboardRect = [0, hPt, wPt, 0];
-        tmp.artboards.setActiveArtboardIndex(0);
-      } catch (eab) {}
+      tmp.artboards[0].artboardRect = [0, hPt, wPt, 0];
+      tmp.artboards.setActiveArtboardIndex(0);
   
-      // Place the CROPPED PNG at the correct position in CARD space
-      // Use the same transform used elsewhere: (x', y') = (x + dx, y + dy)
-      var dx = -cardRectPt[0];
-      var dy = hPt - cardRectPt[1];
-  
+      // Place the CROPPED PNG to exactly fill the artboard (0..w, 0..h)
       var placed = tmp.placedItems.add();
       placed.file = pngFile;
-
-      // --- Place cropped PNG deterministically (bounds-based translate) ---
-      placed.width  = rectW(exportRectPt);
-      placed.height = rectH(exportRectPt);
-      try { app.redraw(); } catch (e) {}
-
-      // Desired placement in tmp doc coordinates (align by LEFT + BOTTOM, more stable)
-      var desiredL = exportRectPt[0] + dx;
-      var desiredB = exportRectPt[3] + dy; // bottom edge in tmp coords
-
-      // Use bounds-based translate for more reliable positioning
-      var pb = null;
-      try { pb = placed.geometricBounds; } catch (e2) {}
-      if (pb && pb.length === 4) {
-        var tdx = desiredL - pb[0];
-        var tdy = (desiredB + placed.height) - pb[1]; // top = bottom + height
-        try { placed.translate(tdx, tdy); } catch (e3) {}
-      } else {
-        // fallback if bounds unavailable
-        placed.left = desiredL;
-        placed.top  = desiredB + placed.height;
-      }
-      try { app.redraw(); } catch (e4) {}
-      var placedB = null;
-      try { placedB = placed.geometricBounds; } catch (ePB) {}
+      placed.width = wPt;
+      placed.height = hPt;
+      placed.left = 0;
+      placed.top = hPt;
+      app.redraw();
   
       tmp.activate();
   
-      // --- TRACE via DOM (Illustrator scripting) ---
-      // PlacedItem.trace() produces a PluginItem with .tracing (TracingObject). :contentReference[oaicite:2]{index=2}
+      // Trace
       var pluginItem = placed.trace();
-  
-      // Tracing is asynchronous; force completion before touching tracing results/options. :contentReference[oaicite:3]{index=3}
       app.redraw();
   
       var tr = pluginItem.tracing;
       var opt = tr.tracingOptions;
   
-      // Configure for a black/white mask: keep black regions, ignore white. :contentReference[oaicite:4]{index=4}
       opt.tracingMode = TracingModeType.TRACINGMODEBLACKANDWHITE;
       opt.fills = true;
       opt.strokes = false;
       opt.ignoreWhite = true;
-  
-      // Tight fit, low noise; mask is high-contrast, so keep it crisp.
-      opt.threshold = 128;       // 0..255 :contentReference[oaicite:5]{index=5}
-      opt.pathFitting = 0.5;     // 0..10 (lower = tighter) :contentReference[oaicite:6]{index=6}
-      opt.cornerAngle = 20;      // 0..180 :contentReference[oaicite:7]{index=7}
-      opt.minArea = 1;           // smallest feature in sq pixels :contentReference[oaicite:8]{index=8}
-      opt.preprocessBlur = 0.0;  // 0..2 :contentReference[oaicite:9]{index=9}
-  
-      // IMPORTANT: do NOT leave livePaintOutput enabled; docs warn it can cause unexpected behavior. :contentReference[oaicite:10]{index=10}
+      opt.threshold = 128;
+      opt.pathFitting = 0.5;
+      opt.cornerAngle = 20;
+      opt.minArea = 1;
+      opt.preprocessBlur = 0.0;
       opt.livePaintOutput = false;
   
-      // Apply options and force retrace completion
       try { tr.retrace(); app.redraw(); } catch (e) {}
       app.redraw();
-
-      // Capture bounds AFTER retrace (otherwise it's stale)
-      var traceB = null;
-      try { traceB = pluginItem.geometricBounds; } catch (eTB) {}
   
-      // Expand tracing to paths (Illustrator DOM v29 exposes expandTracing(viewed)). :contentReference[oaicite:11]{index=11}
-      // Some builds return GroupItem; tracing object is deleted after expansion.
-      var expandedGroup = null;
-      try {
-        expandedGroup = tr.expandTracing(false);
-      } catch (eExp) {
-        // If expandTracing is unavailable in your build, we cannot safely proceed.
-        return null;
-      }
-  
+      // Expand
+      try { tr.expandTracing(false); } catch (eExp) { return null; }
       app.redraw();
-
-      // ---------- REGISTER + REMOVE RECTANGLES (robust, WHOLE-DOC) ----------
-
-      // target bounds in tmp doc coordinates (where the CROPPED PNG lives)
-      var targetBounds = [
-        exportRectPt[0] + dx,  // left
-        exportRectPt[1] + dy,  // top
-        exportRectPt[2] + dx,  // right
-        exportRectPt[3] + dy   // bottom
-      ];
-
-      // 0) Remove live tracing container if it still exists (avoid it polluting bounds)
+  
+      // Cleanup raster + plugin container
       try { pluginItem.remove(); } catch (ePI) {}
-      app.redraw();
-
-      // 1) GROUP ALL VECTOR OUTPUT (not just expandedGroup)
-      // Illustrator may leave expanded items outside expandedGroup.
-      // We gather everything vector-like in the active layer (excluding PlacedItem).
-      var allG = tmp.activeLayer.groupItems.add();
-
-      for (var mi = tmp.activeLayer.pageItems.length - 1; mi >= 0; mi--) {
-        var pit = tmp.activeLayer.pageItems[mi];
-        if (pit === allG) continue;
-        if (pit.typename === "PlacedItem") continue;
-        // skip any remaining PluginItem just in case
-        if (pit.typename === "PluginItem") continue;
-        try { pit.moveToBeginning(allG); } catch (eMv) {}
-      }
-      app.redraw(); // Force bounds update after grouping
-
-      // Check if allG has any content
-      var hasContent = false;
-      try { hasContent = allG && allG.pageItems && allG.pageItems.length > 0; } catch (eHC) {}
-      
-      // 2) REGISTER: translate traced vectors to the ACTUAL placed PNG bounds (most reliable)
-      if (hasContent) {
-        var vb = getBounds(allG);
-        if (vb && vb.length === 4) {
-          var ref = null;
-          if (placedB && placedB.length === 4) ref = placedB;
-          else if (traceB && traceB.length === 4) ref = traceB;
-          else ref = targetBounds;
-
-          var tdx = ref[0] - vb[0]; // align left
-          var tdy = ref[1] - vb[1]; // align top
-          if (Math.abs(tdx) > 0.5 || Math.abs(tdy) > 0.5) {
-            try { allG.translate(tdx, tdy); } catch (eReg) {}
-            app.redraw();
-          }
-        }
-      }
-
-      // 2.5) NORMALIZE: fix "one-artboard-height" Y wrap that can happen after expandTracing()
-      // Some expanded paths end up at y - hPt (exactly one card height down).
-      function normalizeItemToArtboardY(it, hPt) {
-        var bb = getBounds(it);
-        if (!bb) return;
-
-        // Artboard in tmp doc is y in [0..hPt]
-        // If the entire item is below the artboard, shift it up by N*hPt
-        if (bb[1] < 0 && bb[3] < 0) {
-          var nUp = Math.ceil((-bb[1]) / hPt); // bring top >= 0
-          try { it.translate(0, nUp * hPt); } catch (e) {}
-          return;
-        }
-
-        // If the entire item is above the artboard, shift it down by N*hPt
-        if (bb[1] > hPt && bb[3] > hPt) {
-          var nDown = Math.ceil((bb[3] - hPt) / hPt); // bring bottom <= hPt
-          try { it.translate(0, -nDown * hPt); } catch (e2) {}
-          return;
-        }
-      }
-
-      // Apply normalization to each direct child of allG (keep it simple + safe)
-      try {
-        if (allG && allG.pageItems) {
-          for (var ni = 0; ni < allG.pageItems.length; ni++) {
-            normalizeItemToArtboardY(allG.pageItems[ni], hPt);
-          }
-          app.redraw();
-        }
-      } catch (eN) {}
-
-      // 3) REMOVE rectangle-like paths (crop border + frame rectangles)
-      // Works even if tracing created many points.
-      function walkGroup(container, cb) {
-        try {
-          if (!container || !container.pageItems) return;
-          for (var i = 0; i < container.pageItems.length; i++) {
-            var it = container.pageItems[i];
-            cb(it);
-            if (it.typename === "GroupItem") walkGroup(it, cb);
-            if (it.typename === "CompoundPathItem") {
-              try {
-                for (var j = 0; j < it.pathItems.length; j++) cb(it.pathItems[j]);
-              } catch (eCP) {}
-            }
-          }
-        } catch (e) {}
-      }
-
-      function isRectangleLikePath(p, bb, edgeTol, badFrac) {
-        try {
-          if (!p || p.typename !== "PathItem" || !p.closed) return false;
-          var pts = p.pathPoints;
-          if (!pts || pts.length < 4) return false;
-
-          var L = bb[0], T = bb[1], R = bb[2], B = bb[3];
-          var bad = 0;
-
-          for (var i = 0; i < pts.length; i++) {
-            var a = pts[i].anchor;
-            var x = a[0], y = a[1];
-            var d = Math.min(
-              Math.abs(x - L), Math.abs(x - R),
-              Math.abs(y - T), Math.abs(y - B)
-            );
-            if (d > edgeTol) bad++;
-          }
-          return (bad / pts.length) <= badFrac;
-        } catch (e2) {}
-        return false;
-      }
-
-      var rects = [];
-      var targetArea = rectArea(targetBounds);
-
-      walkGroup(allG, function (it) {
-        try {
-          if (!it || it.typename !== "PathItem") return;
-          if (!it.closed) return;
-
-          var bb = getBounds(it);
-          if (!bb) return;
-
-          // ignore tiny junk
-          if (rectArea(bb) < targetArea * 0.10) return;
-          // Deterministic kill: remove any path whose bounds match the placed PNG bounds (crop/frame)
-          var tolEdge = 12.0;
-          var refB = (placedB && placedB.length === 4) ? placedB : targetBounds;
-
-          var isFrameByBounds =
-            Math.abs(bb[0] - refB[0]) <= tolEdge &&
-            Math.abs(bb[1] - refB[1]) <= tolEdge &&
-            Math.abs(bb[2] - refB[2]) <= tolEdge &&
-            Math.abs(bb[3] - refB[3]) <= tolEdge;
-
-          if (isFrameByBounds) {
-            rects.push(it);
-            return;
-          }
-
-          if (isRectangleLikePath(it, bb, 2.5, 0.06)) {
-            rects.push(it);
-          }
-        } catch (e3) {}
-      });
-
-      for (var r = 0; r < rects.length; r++) {
-        try { rects[r].remove(); } catch (e4) {}
-      }
-
-      // ---------- END REGISTER + REMOVE ----------
-
+      try { placed.remove(); } catch (eRm) {}
   
-      // Style expanded vector to stroke-only (outline)
+      // Remove any traced “outer frame” rectangle matching the artboard bounds
+      var frameTol = 2.0;
+      var rectB = [0, hPt, wPt, 0];
+      var kill = [];
+      for (var i = 0; i < tmp.pathItems.length; i++) {
+        var p = tmp.pathItems[i];
+        if (!p.closed) continue;
+        var bb = getBounds(p);
+        if (!bb) continue;
+  
+        var isFrame =
+          Math.abs(bb[0] - rectB[0]) <= frameTol &&
+          Math.abs(bb[1] - rectB[1]) <= frameTol &&
+          Math.abs(bb[2] - rectB[2]) <= frameTol &&
+          Math.abs(bb[3] - rectB[3]) <= frameTol;
+  
+        if (isFrame) kill.push(p);
+      }
+      for (var k = 0; k < kill.length; k++) { try { kill[k].remove(); } catch (eK) {} }
+  
+      // Stroke-only styling
       function stylePathItem(pi) {
         try { pi.filled = false; } catch (e0) {}
         try { pi.stroked = true; } catch (e1) {}
         try { pi.strokeWidth = 1; } catch (e2) {}
         try {
-          var c = new RGBColor();
-          c.red = 0; c.green = 0; c.blue = 0;
+          var c = new RGBColor(); c.red = 0; c.green = 0; c.blue = 0;
           pi.strokeColor = c;
         } catch (e3) {}
       }
   
-      try {
-        // expandedGroup may contain nested items
-        var paths = tmp.pathItems;
-        for (var i = 0; i < paths.length; i++) stylePathItem(paths[i]);
-        var cps = tmp.compoundPathItems;
-        for (var j = 0; j < cps.length; j++) {
-          try {
-            for (var k = 0; k < cps[j].pathItems.length; k++) stylePathItem(cps[j].pathItems[k]);
-          } catch (e4) {}
-        }
-      } catch (e5) {}
-  
-      // Remove the placed raster so it can't affect SVG export
-      try { placed.remove(); } catch (eRm) {}
+      for (var q = 0; q < tmp.pathItems.length; q++) {
+        try { stylePathItem(tmp.pathItems[q]); } catch (e5) {}
+      }
+      for (var cp = 0; cp < tmp.compoundPathItems.length; cp++) {
+        try {
+          var cpi = tmp.compoundPathItems[cp];
+          for (var j = 0; j < cpi.pathItems.length; j++) stylePathItem(cpi.pathItems[j]);
+        } catch (e6) {}
+      }
   
       // Export SVG
       var file = new File(outDir + "/" + svgBaseName + ".svg");
@@ -1071,8 +878,7 @@
     } finally {
       try { tmp.close(SaveOptions.DONOTSAVECHANGES); } catch (eclose) {}
     }
-  }
-  
+  }  
 
   // =========================
   // Layer naming / grouping
@@ -1466,15 +1272,17 @@
           var assets = null;
 
           if (type === "DIECUT") {
-            // Export a clean outline SVG in full card coordinate space
-            var svgBase = outName; // Use same base name as PNG (includes "_mask")
-            var svgFile = exportDiecutOutlineSVGFromLayer(layer, svgBase, cardRectPt);
+            // Export SVG in the SAME coordinate space as the PNG crop (exportRectPt)
+            var svgBase = outName;
+          
+            var svgFile = exportDiecutOutlineSVGFromLayer(layer, svgBase, cardRectPt, exportRectPt);
             if (!svgFile) {
-              svgFile = exportDiecutOutlineSVGFromMaskPNG(outName + ".png", svgBase, cardRectPt, exportRectPt);
+              svgFile = exportDiecutOutlineSVGFromMaskPNG(outName + ".png", svgBase, exportRectPt);
             }
             if (!svgFile) throw new Error("Diecut SVG export failed: " + layer.name);
+          
             assets = { svg: svgFile };
-          }
+          }          
 
           pushMeta(
             g,

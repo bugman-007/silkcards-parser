@@ -355,6 +355,10 @@
     var opts = new ExportOptionsPNG24();
     opts.antiAliasing = true;
     opts.transparency = true;
+
+    // CRITICAL: don't matte transparent pixels to black (causes “all black” plates)
+    opts.matte = false;
+
     opts.artBoardClipping = true;
     opts.horizontalScale = scalePct;
     opts.verticalScale = scalePct;

@@ -669,7 +669,202 @@
     } finally {
       restoreSuppressedGuideRects(touched);
     }
-  }  
+  }
+  
+  function isNearBlackFillColor(c) {
+    if (!c) return false;
+    try {
+      var tn = c.typename;
+  
+      if (tn === "NoColor") return false;
+  
+      // Illustrator has a dedicated RegistrationColor type in some cases
+      if (tn === "RegistrationColor") return true;
+  
+      if (tn === "RGBColor") {
+        return c.red <= 30 && c.green <= 30 && c.blue <= 30;
+      }
+  
+      if (tn === "GrayColor") {
+        return c.gray <= 15;
+      }
+  
+      if (tn === "CMYKColor") {
+        var C = c.cyan, M = c.magenta, Y = c.yellow, K = c.black;
+  
+        // Plain black: high K, low CMY
+        if (K >= 80 && C <= 25 && M <= 25 && Y <= 25) return true;
+  
+        // Registration-like black (often used for scaffolds/frames): all channels high
+        if (K >= 80 && C >= 70 && M >= 70 && Y >= 70) return true;
+  
+        // Rich black fallback (covers many "looks black" builds)
+        if (K >= 90 && (C + M + Y) <= 200) return true;
+  
+        return false;
+      }
+  
+      if (tn === "SpotColor") {
+        var sn = "";
+        try {
+          sn = (c.spot && c.spot.name) ? String(c.spot.name).toLowerCase() : "";
+        } catch (e) {}
+  
+        // Common black/registration naming
+        if (sn.indexOf("registration") >= 0) return true;
+        if (sn === "k" || sn.indexOf("black") >= 0) return true;
+  
+        return false;
+      }
+    } catch (e0) {}
+  
+    return false;
+  }
+  
+  
+  function isLikelyFullCardFilledMatte(it, b, cardRectPt) {
+    // We only handle vector shapes (PathItem / CompoundPathItem)
+    if (!it || !b || !cardRectPt) return false;
+  
+    // Must cover ~whole card
+    var ib = intersectBounds(b, cardRectPt);
+    if (!ib) return false;
+    var ca = rectArea(cardRectPt);
+    if (ca <= 1) return false;
+  
+    // If it covers >=95% of the card, it’s a candidate matte/scaffold
+    if (rectArea(ib) / ca < 0.95) return false;
+  
+    // Must be filled (not NoColor)
+    try {
+      if (it.typename === "PathItem") {
+        if (!it.filled) return false;
+        if (it.fillColor && it.fillColor.typename === "NoColor") return false;
+        // Only suppress “black matte” (prevents deleting legit full-coverage plates)
+        return isNearBlackFillColor(it.fillColor);
+      }
+  
+      if (it.typename === "CompoundPathItem") {
+        // If ANY child path is filled black and covers the card, treat as matte
+        for (var i = 0; i < it.pathItems.length; i++) {
+          var pi = it.pathItems[i];
+          if (!pi) continue;
+          if (!pi.filled) continue;
+          if (pi.fillColor && pi.fillColor.typename === "NoColor") continue;
+          if (isNearBlackFillColor(pi.fillColor)) return true;
+        }
+      }
+    } catch (e1) {}
+  
+    return false;
+  }
+  
+  function suppressFullCardBlackMattes(layer, cardRectPt) {
+    var touched = [];
+  
+    walkLayerItemsDeep(layer, function (it) {
+      try { if (it.hidden) return; } catch (e0) {}
+  
+      if (!it || (it.typename !== "PathItem" && it.typename !== "CompoundPathItem")) return;
+  
+      var b = getBounds(it);
+      if (!b) return;
+  
+      if (!isLikelyFullCardFilledMatte(it, b, cardRectPt)) return;
+  
+      // If it’s used as a clip path or inside clipped group, don’t hide it; just remove its FILL.
+      var isClip = false;
+      try { isClip = !!it.clipping; } catch (e1) { isClip = false; }
+      
+      // For CompoundPathItem, child paths can carry the clipping flag
+      if (!isClip && it.typename === "CompoundPathItem") {
+        try {
+          for (var ci = 0; ci < it.pathItems.length; ci++) {
+            if (it.pathItems[ci] && it.pathItems[ci].clipping) { isClip = true; break; }
+          }
+        } catch (e2) {}
+      }
+  
+      var inClippedGroup = _isInClippedGroup(it);
+  
+      if (it.typename === "PathItem") {
+        var rec = { kind: "fillPath", it: it };
+        try { rec.wasHidden = it.hidden; } catch (e2) { rec.wasHidden = false; }
+        try { rec.wasFilled = it.filled; } catch (e3) { rec.wasFilled = true; }
+        try { rec.wasFillColor = it.fillColor; } catch (e4) {}
+  
+        try {
+          if (isClip || inClippedGroup) {
+            it.filled = false; // keep clipping, remove black matte
+          } else {
+            it.hidden = true;  // safe to hide
+          }
+        } catch (e5) {}
+  
+        touched.push(rec);
+        return;
+      }
+  
+      // CompoundPathItem: operate on its child paths
+      try {
+        for (var i = 0; i < it.pathItems.length; i++) {
+          var pi = it.pathItems[i];
+          if (!pi) continue;
+  
+          // Only change those that are actually filled black
+          if (!pi.filled) continue;
+          if (pi.fillColor && pi.fillColor.typename === "NoColor") continue;
+          if (!isNearBlackFillColor(pi.fillColor)) continue;
+  
+          var rec2 = { kind: "fillPath", it: pi };
+          try { rec2.wasHidden = pi.hidden; } catch (e6) { rec2.wasHidden = false; }
+          try { rec2.wasFilled = pi.filled; } catch (e7) { rec2.wasFilled = true; }
+          try { rec2.wasFillColor = pi.fillColor; } catch (e8) {}
+  
+          try {
+            if (isClip || inClippedGroup) {
+              pi.filled = false;
+            } else {
+              pi.hidden = true;
+            }
+          } catch (e9) {}
+  
+          touched.push(rec2);
+        }
+      } catch (e10) {}
+    });
+  
+    try { app.redraw(); } catch (eR) {}
+    return touched;
+  }
+  
+  function restoreSuppressedFullCardBlackMattes(touched) {
+    for (var i = 0; i < touched.length; i++) {
+      var r = touched[i];
+      var it = r.it;
+      if (!it) continue;
+  
+      try { it.hidden = r.wasHidden; } catch (e0) {}
+      if (r.kind === "fillPath") {
+        try { it.filled = r.wasFilled; } catch (e1) {}
+        try { if (r.wasFillColor) it.fillColor = r.wasFillColor; } catch (e2) {}
+      }
+    }
+    try { app.redraw(); } catch (eR) {}
+  }
+  
+  function withEmbossMaskCleanup(layer, cardRectPt, fn) {
+    // First: remove red guide frames
+    var g = suppressGuideRectsForMaskExport(layer, cardRectPt);
+    // Second: remove full-card black mattes
+    var m = suppressFullCardBlackMattes(layer, cardRectPt);
+    try {
+      return fn();
+    } finally {
+      restoreSuppressedFullCardBlackMattes(m);
+      restoreSuppressedGuideRects(g);
+    }
+  }
 
   function exportDiecutOutlineSVGFromLayer(layer, svgBaseName, cardRectPt, svgRectPt) {
     var mapRectPt = svgRectPt || cardRectPt; // Use crop rect if provided, else fallback to card rect
@@ -1485,11 +1680,13 @@
           
           // Apply guide-rect suppression for mask exports that often contain those red frames.
           // DO NOT apply to DIECUT: diecut paths are often red stroke lines and you’ll hide real cut geometry.
-          if (type === "EMBOSS" || type === "UV" || type === "FOIL") {
+          if (type === "EMBOSS") {
+            info = withEmbossMaskCleanup(layer, cardRectPt, doPlateExport);
+          } else if (type === "UV" || type === "FOIL") {
             info = withGuideRectsSuppressed(layer, cardRectPt, doPlateExport);
           } else {
             info = doPlateExport();
-          }          
+          }     
 
           var assets = null;
 

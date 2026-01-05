@@ -144,6 +144,44 @@
     } catch (e0) {}
   }
 
+  function expandAppearanceForSoloedLayer(targetLayer) {
+    // Assumes soloLayer() was already called, so only the target layer is visible.
+    // Convert GroupItem-level appearance fills/effects into real PathItems we can suppress.
+    var oldUIL = app.userInteractionLevel;
+    app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
+    try {
+      try { doc.selection = null; } catch (e0) {}
+  
+      // Select everything visible (only the soloed layer should be visible)
+      try { app.executeMenuCommand("selectall"); } catch (e1) {}
+  
+      // Expand appearance
+      try { app.executeMenuCommand("expandStyle"); } catch (e2) {}
+      try { app.executeMenuCommand("expand"); } catch (e3) {}
+  
+      // CRITICAL: ensure expanded result lives inside the intended layer container
+      // (some AI builds leave expanded items as doc-level or outside the layer reference)
+      try {
+        if (targetLayer) {
+          // group current selection
+          try { app.executeMenuCommand("group"); } catch (eg) {}
+  
+          // move grouped selection into the target layer
+          var sel = doc.selection;
+          if (sel && sel.length) {
+            for (var i = 0; i < sel.length; i++) {
+              try { sel[i].moveToBeginning(targetLayer); } catch (em) {}
+            }
+          }
+        }
+      } catch (eM) {}
+  
+      try { app.redraw(); } catch (e4) {}
+    } finally {
+      app.userInteractionLevel = oldUIL;
+    }
+  }  
+
   // Hide everything initially
   for (var i0 = 0; i0 < doc.layers.length; i0++)
     hideLayerRecursive(doc.layers[i0]);
@@ -1739,8 +1777,13 @@
 
           soloLayer(layer);
 
+          // CRITICAL: make group-level fills/effects real geometry for emboss export
+          if (type === "EMBOSS") {
+            expandAppearanceForSoloedLayer(layer);
+          }
+
           var layerBounds = collectLayerBounds(layer);
-          if (!layerBounds) continue; // truly empty layer
+          if (!layerBounds) continue;
 
           var exportRectPt = null;
           var outName = null;

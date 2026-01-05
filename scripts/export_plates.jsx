@@ -463,6 +463,127 @@
     return false;
   }
 
+  // =========================
+  // Guide rect suppression (for MASK png exports: FOIL/UV/EMBOSS)
+  // - We CANNOT just hide clipping paths, or clipped content disappears.
+  // - So: if rect is a clipping path (or parent clipped), remove its stroke;
+  //        otherwise hide the rect.
+  // - Restores everything afterwards.
+  // =========================
+
+  function isRectishStrokeOnly(it) {
+    try {
+      if (!it || it.typename !== "PathItem") return false;
+      if (!it.closed) return false;
+      if (!it.pathPoints || it.pathPoints.length !== 4) return false;
+      if (!it.stroked) return false;
+
+      // Must be "no fill"
+      if (it.filled) {
+        if (!it.fillColor) return false;
+        if (it.fillColor.typename !== "NoColor") return false;
+      }
+      return true;
+    } catch (e) {}
+    return false;
+  }
+
+  // More general than isLikelyGuideRect(): catches inset safe/bleed frames too.
+  function isGuideRectForMaskPlates(it, b, cardRectPt) {
+    if (!isRectishStrokeOnly(it)) return false;
+
+    // Named guides always count
+    if (nameLooksGuide(it)) return true;
+
+    // Keep existing "near-card edge" heuristic too
+    if (cardRectPt && isLikelyGuideRect(it, b, cardRectPt)) return true;
+
+    // Otherwise: red stroke rectangle of meaningful size -> treat as guide
+    try {
+      if (!isRedStrokeColor(it.strokeColor)) return false;
+    } catch (e2) {
+      return false;
+    }
+
+    // Avoid nuking small red rectangles that could be real artwork
+    if (cardRectPt && b) {
+      var a = rectArea(b);
+      var ca = rectArea(cardRectPt);
+      if (ca > 1 && (a / ca) < 0.02) return false; // <2% of card area: ignore
+    }
+
+    return true;
+  }
+
+  function suppressGuideRectsForMaskExport(layer, cardRectPt) {
+    var touched = [];
+
+    walkLayerItemsDeep(layer, function (it) {
+      try { if (it.hidden) return; } catch (e0) {}
+
+      if (!it || it.typename !== "PathItem") return;
+
+      var b = getBounds(it);
+      if (!b) return;
+
+      if (!isGuideRectForMaskPlates(it, b, cardRectPt)) return;
+
+      var rec = { it: it };
+
+      // save state
+      try { rec.wasHidden = it.hidden; } catch (e1) { rec.wasHidden = false; }
+      try { rec.wasStroked = it.stroked; } catch (e2) { rec.wasStroked = true; }
+      try { rec.wasStrokeWidth = it.strokeWidth; } catch (e3) { rec.wasStrokeWidth = 1; }
+      try { rec.wasStrokeColor = it.strokeColor; } catch (e4) {}
+
+      var isClip = false;
+      try { isClip = !!it.clipping; } catch (e5) { isClip = false; }
+
+      var parentClipped = false;
+      try {
+        parentClipped = (it.parent && it.parent.typename === "GroupItem" && it.parent.clipped);
+      } catch (e6) { parentClipped = false; }
+
+      // Apply suppression:
+      // - If clipping path / in clipped group: keep path, drop the visible stroke
+      // - Else: just hide it
+      try {
+        if (isClip || parentClipped) {
+          it.stroked = false;
+          it.strokeWidth = 0;
+        } else {
+          it.hidden = true;
+        }
+      } catch (e7) {}
+
+      touched.push(rec);
+    });
+
+    return touched;
+  }
+
+  function restoreSuppressedGuideRects(touched) {
+    for (var i = 0; i < touched.length; i++) {
+      var r = touched[i];
+      var it = r.it;
+      if (!it) continue;
+
+      try { it.hidden = r.wasHidden; } catch (e0) {}
+      try { it.stroked = r.wasStroked; } catch (e1) {}
+      try { it.strokeWidth = r.wasStrokeWidth; } catch (e2) {}
+      try { if (r.wasStrokeColor) it.strokeColor = r.wasStrokeColor; } catch (e3) {}
+    }
+  }
+
+  function withGuideRectsSuppressed(layer, cardRectPt, fn) {
+    var touched = suppressGuideRectsForMaskExport(layer, cardRectPt);
+    try {
+      return fn();
+    } finally {
+      restoreSuppressedGuideRects(touched);
+    }
+  }
+
   function exportDiecutOutlineSVGFromLayer(layer, svgBaseName, cardRectPt, svgRectPt) {
     var mapRectPt = svgRectPt || cardRectPt; // Use crop rect if provided, else fallback to card rect
     
@@ -1247,27 +1368,38 @@
           var exportRectPt = null;
           var outName = null;
 
-          if (type === "PRINT") {
-            // ALWAYS export prints at the full card rect for consistency
-            exportRectPt = cardRectPt;
-            outName = layer.name;
-          } else {
-            // Effects: crop to actual content but keep placement via rectPx relative to cardRectPt
-            var contentBounds = collectLayerContentBounds(
-              layer,
-              rectW(cardRectPt),
-              rectH(cardRectPt)
-            );
-            if (!contentBounds) contentBounds = cardRectPt;
-
-            var clipped = intersectBounds(contentBounds, cardRectPt);
-            exportRectPt = clipped ? clipped : contentBounds;
-
-            // NOTE: keep your existing naming convention
-            outName = layer.name + "_mask";
+          function doPlateExport() {
+            if (type === "PRINT") {
+              // ALWAYS export prints at full card rect
+              exportRectPt = cardRectPt;
+              outName = layer.name;
+            } else {
+              // Effects: crop to actual content (after guides are suppressed)
+              var contentBounds = collectLayerContentBounds(
+                layer,
+                rectW(cardRectPt),
+                rectH(cardRectPt)
+              );
+              if (!contentBounds) contentBounds = cardRectPt;
+          
+              var clipped = intersectBounds(contentBounds, cardRectPt);
+              exportRectPt = clipped ? clipped : contentBounds;
+          
+              outName = layer.name + "_mask";
+            }
+          
+            return exportPNGClipped(outName, exportRectPt, dpiForced);
           }
-
-          var info = exportPNGClipped(outName, exportRectPt, dpiForced);
+          
+          var info;
+          
+          // Apply guide-rect suppression for mask exports that often contain those red frames.
+          // DO NOT apply to DIECUT: diecut paths are often red stroke lines and you’ll hide real cut geometry.
+          if (type === "EMBOSS" || type === "UV" || type === "FOIL") {
+            info = withGuideRectsSuppressed(layer, cardRectPt, doPlateExport);
+          } else {
+            info = doPlateExport();
+          }          
 
           var assets = null;
 

@@ -502,7 +502,7 @@
     try {
       if (!pi || pi.typename !== "PathItem") return false;
       if (!pi.closed) return false;
-      if (!pi.pathPoints || pi.pathPoints.length !== 4) return false;
+      if (!pi.pathPoints || pi.pathPoints.length < 4) return false;
       if (!pi.stroked) return false;
   
       // No fill

@@ -145,33 +145,26 @@
   }
 
   function expandAppearanceForSoloedLayer(targetLayer) {
-    // Assumes soloLayer() was already called, so only the target layer is visible.
-    // Convert GroupItem-level appearance fills/effects into real PathItems we can suppress.
     var oldUIL = app.userInteractionLevel;
     app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
     try {
       try { doc.selection = null; } catch (e0) {}
   
-      // Select everything visible (only the soloed layer should be visible)
+      // Select everything visible (soloLayer already ran)
       try { app.executeMenuCommand("selectall"); } catch (e1) {}
   
       // Expand appearance
       try { app.executeMenuCommand("expandStyle"); } catch (e2) {}
       try { app.executeMenuCommand("expand"); } catch (e3) {}
   
-      // CRITICAL: ensure expanded result lives inside the intended layer container
-      // (some AI builds leave expanded items as doc-level or outside the layer reference)
+      // Preserve relationships: group once, move the single group only
+      try { app.executeMenuCommand("group"); } catch (eg) {}
+  
       try {
         if (targetLayer) {
-          // group current selection
-          try { app.executeMenuCommand("group"); } catch (eg) {}
-  
-          // move grouped selection into the target layer
           var sel = doc.selection;
-          if (sel && sel.length) {
-            for (var i = 0; i < sel.length; i++) {
-              try { sel[i].moveToBeginning(targetLayer); } catch (em) {}
-            }
+          if (sel && sel.length === 1) {
+            try { sel[0].moveToBeginning(targetLayer); } catch (em) {}
           }
         }
       } catch (eM) {}
@@ -793,28 +786,46 @@
   
     try {
       if (it.typename === "PathItem") {
-        // Full-card mattes are almost always rect-ish + filled
         if (!_looksRectishPath(it)) return false;
         return _hasRealFill(it);
       }
   
       if (it.typename === "CompoundPathItem") {
-        // If ANY child path is filled + rect-ish, treat as matte
+        // Only treat as matte if it contains a child path that itself is full-card-ish.
         for (var i = 0; i < it.pathItems.length; i++) {
           var pi = it.pathItems[i];
           if (!pi) continue;
           if (!_looksRectishPath(pi)) continue;
-          if (_hasRealFill(pi)) return true;
+          if (!_hasRealFill(pi)) continue;
+  
+          var bb = getBounds(pi);
+          if (!bb) continue;
+  
+          var iib = intersectBounds(bb, cardRectPt);
+          if (!iib) continue;
+  
+          if (rectArea(iib) / ca >= 0.95) return true;
         }
+        return false;
       }
     } catch (e1) {}
   
     return false;
-  }
-  
+  }  
   
   function suppressFullCardBlackMattes(layer, cardRectPt) {
     var touched = [];
+  
+    function makeBlackFill(pi) {
+      try { pi.stroked = false; } catch (e0) {}
+      try { pi.filled = true; } catch (e1) {}
+      try {
+        var c = new RGBColor();
+        c.red = 0; c.green = 0; c.blue = 0;
+        pi.fillColor = c;
+      } catch (e2) {}
+      try { pi.opacity = 100; } catch (e3) {}
+    }
   
     walkLayerItemsDeep(layer, function (it) {
       try { if (it.hidden) return; } catch (e0) {}
@@ -824,14 +835,11 @@
       var b = getBounds(it);
       if (!b) return;
   
-      // NOTE: isLikelyFullCardFilledMatte is now color-agnostic (any full-card filled rect-ish matte).
       if (!isLikelyFullCardFilledMatte(it, b, cardRectPt)) return;
   
-      // If it’s used as a clip path or inside clipped group, don’t hide it; just remove its FILL.
+      // clip safety
       var isClip = false;
       try { isClip = !!it.clipping; } catch (e1) { isClip = false; }
-  
-      // For CompoundPathItem, child paths can carry the clipping flag
       if (!isClip && it.typename === "CompoundPathItem") {
         try {
           for (var ci = 0; ci < it.pathItems.length; ci++) {
@@ -839,7 +847,6 @@
           }
         } catch (e2) {}
       }
-  
       var inClippedGroup = _isInClippedGroup(it);
   
       // --- PathItem matte ---
@@ -850,11 +857,9 @@
         try { rec.wasFillColor = it.fillColor; } catch (e5) {}
   
         try {
-          if (isClip || inClippedGroup) {
-            it.filled = false; // keep clipping, remove matte fill
-          } else {
-            it.hidden = true;  // safe to hide
-          }
+          // Never hide a full-card PathItem for emboss: it may be the opacity-mask/appearance carrier.
+          // Make it a stable black mask carrier instead.
+          makeBlackFill(it);
         } catch (e6) {}
   
         touched.push(rec);
@@ -862,42 +867,66 @@
       }
   
       // --- CompoundPathItem matte ---
-      // If not clipped: hide the whole container (simplest + safest).
-      if (!(isClip || inClippedGroup)) {
-        try {
-          var recC = { kind: "container", it: it };
-          try { recC.wasHidden = it.hidden; } catch (e7) { recC.wasHidden = false; }
-          it.hidden = true;
-          touched.push(recC);
-          return;
-        } catch (e8) {
-          // fallback to per-child edits below
-        }
-      }
-  
-      // If clipped: do NOT hide. Remove fill from child paths that have real fill.
+      // DO NOT hide the whole container. Remove only the full-card child path(s).
+      // Also: duplicate remaining child paths out as positive shapes (covers “stamp-as-hole” compound paths).
       try {
+        var ca = rectArea(cardRectPt);
+  
+        // Identify full-card-ish children
+        var fullKids = [];
         for (var i = 0; i < it.pathItems.length; i++) {
           var pi = it.pathItems[i];
           if (!pi) continue;
+          if (!_hasRealFill(pi)) continue;
   
-          // remove matte fill regardless of color type
-          if (!pi.filled) continue;
-          if (pi.fillColor && pi.fillColor.typename === "NoColor") continue;
+          var bb = getBounds(pi);
+          if (!bb) continue;
   
-          var rec2 = { kind: "fillPath", it: pi };
-          try { rec2.wasHidden = pi.hidden; } catch (e9) { rec2.wasHidden = false; }
-          try { rec2.wasFilled = pi.filled; } catch (e10) { rec2.wasFilled = true; }
-          try { rec2.wasFillColor = pi.fillColor; } catch (e11) {}
+          var iib = intersectBounds(bb, cardRectPt);
+          if (!iib) continue;
+  
+          if (rectArea(iib) / ca >= 0.95) fullKids.push(pi);
+        }
+  
+        // Duplicate non-full-card children as positive filled shapes (stamp)
+        for (var j = 0; j < it.pathItems.length; j++) {
+          var child = it.pathItems[j];
+          if (!child) continue;
+  
+          // skip the full-card kids we’re about to suppress
+          var isFull = false;
+          for (var fk = 0; fk < fullKids.length; fk++) if (fullKids[fk] === child) { isFull = true; break; }
+          if (isFull) continue;
+  
+          // Don’t duplicate tiny noise
+          var cb = getBounds(child);
+          if (!cb) continue;
+          if (rectArea(cb) / ca < 0.002) continue; // <0.2% card
   
           try {
-            // clipped => remove fill (do not hide)
-            pi.filled = false;
-          } catch (e12) {}
+            var dup = child.duplicate(layer, ElementPlacement.PLACEATBEGINNING);
+            makeBlackFill(dup);
+            touched.push({ kind: "added", it: dup });
+          } catch (ed) {}
+        }
+  
+        // Suppress only the full-card kids
+        for (var f = 0; f < fullKids.length; f++) {
+          var pk = fullKids[f];
+  
+          var rec2 = { kind: "fillPath", it: pk };
+          try { rec2.wasHidden = pk.hidden; } catch (e7) { rec2.wasHidden = false; }
+          try { rec2.wasFilled = pk.filled; } catch (e8) { rec2.wasFilled = true; }
+          try { rec2.wasFillColor = pk.fillColor; } catch (e9) {}
+  
+          try {
+            if (isClip || inClippedGroup) pk.filled = false;
+            else pk.hidden = true;
+          } catch (e10) {}
   
           touched.push(rec2);
         }
-      } catch (e13) {}
+      } catch (e11) {}
     });
   
     try { app.redraw(); } catch (eR) {}
@@ -909,6 +938,11 @@
       var r = touched[i];
       var it = r.it;
       if (!it) continue;
+
+      if (r.kind === "added") {
+        try { r.it.remove(); } catch (eX) {}
+        continue;
+      }
   
       try { it.hidden = r.wasHidden; } catch (e0) {}
       if (r.kind === "fillPath") {
@@ -952,30 +986,70 @@
   
   function suppressFullCardRasterMattes(layer, cardRectPt) {
     var touched = [];
+    var candidates = [];
+    var hasOtherInk = false;
   
+    var ca = rectArea(cardRectPt);
+    if (ca <= 1) return touched;
+  
+    // Pass 1: collect raster candidates + detect if there is any other visible "ink"
     walkLayerItemsDeep(layer, function (it) {
       try { if (it.hidden) return; } catch (e0) {}
       if (!it) return;
   
-      // Only raster-like items
-      if (!isRasterLike(it)) return;
-  
       var b = getBounds(it);
       if (!b) return;
   
-      if (!isLikelyFullCardRasterMatte(it, b, cardRectPt)) return;
+      var ib = intersectBounds(b, cardRectPt);
+      if (!ib) return;
   
-      var rec = { it: it, kind: "raster" };
-      try { rec.wasHidden = it.hidden; } catch (e1) { rec.wasHidden = false; }
+      var cover = rectArea(ib) / ca;
   
-      try { it.hidden = true; } catch (e2) {}
+      // Full-card raster candidate (might be matte OR might be the actual emboss stamp on a full-size transparent PNG)
+      if (isRasterLike(it) && cover >= 0.95) {
+        // respect KEEP override
+        try {
+          if (it.name && String(it.name).length) {
+            var n = String(it.name).toLowerCase();
+            if (n.indexOf("keep") >= 0) return;
+          }
+        } catch (e1) {}
+  
+        candidates.push(it);
+        return;
+      }
+  
+      // Any other visible content inside the card counts as "ink"
+      // (If this exists, then a full-card raster is more likely a matte/scaffold.)
+      if (cover > 0.0005 && cover < 0.95) {
+        hasOtherInk = true;
+      } else {
+        // Text frames / symbols can have big bounds; still count them if they intersect.
+        try {
+          if (it.typename === "TextFrame" || it.typename === "SymbolItem") hasOtherInk = true;
+        } catch (e2) {}
+      }
+    });
+  
+    // If the layer would become empty by removing these rasters, KEEP them.
+    if (!hasOtherInk) return touched;
+  
+    // Pass 2: hide raster mattes now that we know there is other ink
+    for (var i = 0; i < candidates.length; i++) {
+      var r = candidates[i];
+      if (!r) continue;
+  
+      var rec = { it: r, kind: "raster" };
+      try { rec.wasHidden = r.hidden; } catch (e3) { rec.wasHidden = false; }
+  
+      try { r.hidden = true; } catch (e4) {}
   
       touched.push(rec);
-    });
+    }
   
     try { app.redraw(); } catch (eR) {}
     return touched;
-  }
+  }  
   
   function restoreSuppressedRasterMattes(touched) {
     for (var i = 0; i < touched.length; i++) {

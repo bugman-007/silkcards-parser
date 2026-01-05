@@ -236,6 +236,13 @@
     return b;
   }
 
+  function getVisibleBounds(obj) {
+    var b = null;
+    try { b = obj.visibleBounds; } catch (e) {}
+    if (!isValidBounds(b) || rectW(b) < 0.01 || rectH(b) < 0.01) return null;
+    return b;
+  }  
+
   function walkPageItems(container, cb) {
     if (!container || !container.pageItems) return;
     for (var i = 0; i < container.pageItems.length; i++) {
@@ -292,17 +299,80 @@
     return false;
   }
 
+  function hasRenderableInkInRect(layer, rectPt) {
+    var hit = false;
+    walkLayerItemsDeep(layer, function (it) {
+      if (hit) return;
+      if (!isRenderableItem(it)) return;
+  
+      var b = getVisibleBounds(it);
+      if (!b) return;
+  
+      if (intersectBounds(b, rectPt)) hit = true;
+    });
+    return hit;
+  }  
+
   function collectLayerContentBounds(layer, cardW, cardH) {
     var bounds = null;
+  
     walkLayerItemsDeep(layer, function (it) {
-      try { if (it.hidden) return; } catch (e0) {}
-      var b = getBounds(it);
+      if (!isRenderableItem(it)) return;
+  
+      // IMPORTANT: for “content”, use visible bounds (respects clipping + masks)
+      var b = getVisibleBounds(it);
       if (!b) return;
+  
       if (isLikelyFrameItem(it, b, cardW, cardH)) return;
       bounds = unionBounds(bounds, b);
     });
+  
     return bounds;
-  }
+  }  
+
+  function isRenderableItem(it) {
+    if (!it) return false;
+  
+    try { if (it.hidden) return false; } catch (e0) {}
+    try { if (it.opacity !== undefined && it.opacity <= 0) return false; } catch (e1) {}
+  
+    var tn = "";
+    try { tn = it.typename; } catch (e2) {}
+  
+    // Path: renderable if it has visible fill or stroke
+    if (tn === "PathItem") {
+      try {
+        var hasFill = it.filled && !(it.fillColor && it.fillColor.typename === "NoColor");
+        var hasStroke = it.stroked && (it.strokeWidth === undefined || it.strokeWidth > 0);
+        return !!(hasFill || hasStroke);
+      } catch (e3) {
+        return true;
+      }
+    }
+  
+    // Compound path: renderable if any child path is renderable
+    if (tn === "CompoundPathItem") {
+      try {
+        for (var i = 0; i < it.pathItems.length; i++) {
+          if (isRenderableItem(it.pathItems[i])) return true;
+        }
+        return false;
+      } catch (e4) {
+        return true;
+      }
+    }
+  
+    // GroupItem: DO NOT assume it’s renderable.
+    // Many “empty” groups still have huge geometric bounds and will poison contentBounds.
+    // If it truly renders (appearance/opacity mask), visibleBounds should exist.
+    if (tn === "GroupItem") {
+      var vb = getVisibleBounds(it);
+      return !!vb;
+    }
+  
+    // Raster/text/etc: if it’s not hidden/opacity 0, treat as renderable
+    return true;
+  }  
 
   // =========================
   // Units
@@ -480,7 +550,7 @@
 
     // Otherwise require rectangle-ish + near-frame + red stroke
     var isRectish = false;
-    try { isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4; } catch (e1) {}
+    try { isRectish = it.closed && it.pathPoints && it.pathPoints.length >= 4; } catch (e1) {}
 
     if (!isRectish) return false;
 
@@ -1093,7 +1163,7 @@
     function isStrokeOnlyRectNearCard(it, b) {
       try {
         if (!it || it.typename !== "PathItem") return false;
-        var isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4;
+        var isRectish = it.closed && it.pathPoints && it.pathPoints.length >= 4;
         if (!isRectish) return false;
 
         var strokeOnly = it.stroked && (!it.filled || (it.fillColor && it.fillColor.typename === "NoColor"));
@@ -1116,7 +1186,7 @@
       if (isClip) return false;
       try {
         if (!it || it.typename !== "PathItem") return false;
-        var isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4;
+        var isRectish = it.closed && it.pathPoints && it.pathPoints.length >= 4;
         if (!isRectish) return false;
 
         var hasFill = it.filled && !(it.fillColor && it.fillColor.typename === "NoColor");
@@ -1858,48 +1928,56 @@
 
           var layerBounds = collectLayerBounds(layer);
           if (!layerBounds) continue;
+          var localCardRectPt = findLayerCardRect(layer, rectW(cardRectPt), rectH(cardRectPt));
+          if (localCardRectPt) {
+            localCardRectPt = centerRectAround(localCardRectPt, rectW(cardRectPt), rectH(cardRectPt));
+          } else {
+            localCardRectPt = cardRectPt;
+          }
 
           var exportRectPt = null;
           var outName = null;
 
           function doPlateExport() {
             if (type === "PRINT") {
-              // ALWAYS export prints at full card rect
-              exportRectPt = cardRectPt;
+              // Export prints at the layer's local card tile rect (normalizes stacked tiles)
+              exportRectPt = localCardRectPt;
               outName = layer.name;
             } else {
-              // Compute content bounds for all effect plates (guides/mattes already suppressed outside)
               var contentBounds = collectLayerContentBounds(
                 layer,
-                rectW(cardRectPt),
-                rectH(cardRectPt)
+                rectW(localCardRectPt),
+                rectH(localCardRectPt)
               );
-              if (!contentBounds) contentBounds = layerBounds || cardRectPt;
-              var clipped = intersectBounds(contentBounds, cardRectPt);
+              if (!contentBounds) contentBounds = layerBounds || localCardRectPt;
+          
+              var clipped = intersectBounds(contentBounds, localCardRectPt);
+          
               if (type === "EMBOSS") {
-                // Keep full-card emboss when it's actually on the card; otherwise export where the emboss lives
-                exportRectPt = clipped ? cardRectPt : contentBounds;
+                exportRectPt = hasRenderableInkInRect(layer, localCardRectPt)
+                  ? localCardRectPt
+                  : contentBounds;
               } else {
-                // FOIL/UV/etc: crop to content when possible, otherwise export where it lives
                 exportRectPt = clipped ? clipped : contentBounds;
               }
+          
               outName = layer.name + "_mask";
             }
           
             return exportPNGClipped(outName, exportRectPt, dpiForced);
-          }
+          }          
           
           var info;
           
           // Apply guide-rect suppression for mask exports that often contain those red frames.
           // DO NOT apply to DIECUT: diecut paths are often red stroke lines and you’ll hide real cut geometry.
           if (type === "EMBOSS") {
-            info = withEmbossMaskCleanup(layer, cardRectPt, doPlateExport);
+            info = withEmbossMaskCleanup(layer, localCardRectPt, doPlateExport);
           } else if (type === "UV" || type === "FOIL") {
-            info = withGuideRectsSuppressed(layer, cardRectPt, doPlateExport);
+            info = withGuideRectsSuppressed(layer, localCardRectPt, doPlateExport);
           } else {
             info = doPlateExport();
-          }     
+          }  
 
           var assets = null;
 
@@ -1907,7 +1985,7 @@
             // Export SVG in the SAME coordinate space as the PNG crop (exportRectPt)
             var svgBase = outName;
           
-            var svgFile = exportDiecutOutlineSVGFromLayer(layer, svgBase, cardRectPt, exportRectPt);
+            var svgFile = exportDiecutOutlineSVGFromLayer(layer, svgBase, localCardRectPt, exportRectPt);
             if (!svgFile) {
               svgFile = exportDiecutOutlineSVGFromMaskPNG(outName + ".png", svgBase, exportRectPt);
             }
@@ -1920,7 +1998,7 @@
             g,
             type,
             outName,
-            cardRectPt,
+            localCardRectPt,
             exportRectPt,
             info.dpiUsed,
             info.wPx,

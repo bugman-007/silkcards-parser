@@ -852,19 +852,86 @@
     }
     try { app.redraw(); } catch (eR) {}
   }
+
+  function isRasterLike(it) {
+    try {
+      var tn = it.typename;
+      return tn === "RasterItem" || tn === "PlacedItem" || tn === "PluginItem";
+    } catch (e) {}
+    return false;
+  }
+  
+  function isLikelyFullCardRasterMatte(it, b, cardRectPt) {
+    if (!it || !b || !cardRectPt) return false;
+  
+    // Must cover ~whole card
+    var ib = intersectBounds(b, cardRectPt);
+    if (!ib) return false;
+  
+    var ca = rectArea(cardRectPt);
+    if (ca <= 1) return false;
+  
+    if (rectArea(ib) / ca < 0.95) return false;
+  
+    // If explicitly named as artwork, don't touch it
+    try {
+      if (it.name && String(it.name).length) {
+        var n = String(it.name).toLowerCase();
+        if (n.indexOf("emboss") >= 0 || n.indexOf("art") >= 0 || n.indexOf("logo") >= 0) return false;
+      }
+    } catch (e2) {}
+  
+    return isRasterLike(it);
+  }
+  
+  function suppressFullCardRasterMattes(layer, cardRectPt) {
+    var touched = [];
+  
+    walkLayerItemsDeep(layer, function (it) {
+      try { if (it.hidden) return; } catch (e0) {}
+      if (!it) return;
+  
+      // Only raster-like items
+      if (!isRasterLike(it)) return;
+  
+      var b = getBounds(it);
+      if (!b) return;
+  
+      if (!isLikelyFullCardRasterMatte(it, b, cardRectPt)) return;
+  
+      var rec = { it: it, kind: "raster" };
+      try { rec.wasHidden = it.hidden; } catch (e1) { rec.wasHidden = false; }
+  
+      try { it.hidden = true; } catch (e2) {}
+  
+      touched.push(rec);
+    });
+  
+    try { app.redraw(); } catch (eR) {}
+    return touched;
+  }
+  
+  function restoreSuppressedRasterMattes(touched) {
+    for (var i = 0; i < touched.length; i++) {
+      var r = touched[i];
+      if (!r || !r.it) continue;
+      try { r.it.hidden = r.wasHidden; } catch (e0) {}
+    }
+    try { app.redraw(); } catch (eR) {}
+  }  
   
   function withEmbossMaskCleanup(layer, cardRectPt, fn) {
-    // First: remove red guide frames
     var g = suppressGuideRectsForMaskExport(layer, cardRectPt);
-    // Second: remove full-card black mattes
     var m = suppressFullCardBlackMattes(layer, cardRectPt);
+    var r = suppressFullCardRasterMattes(layer, cardRectPt);
     try {
       return fn();
     } finally {
+      restoreSuppressedRasterMattes(r);
       restoreSuppressedFullCardBlackMattes(m);
       restoreSuppressedGuideRects(g);
     }
-  }
+  }  
 
   function exportDiecutOutlineSVGFromLayer(layer, svgBaseName, cardRectPt, svgRectPt) {
     var mapRectPt = svgRectPt || cardRectPt; // Use crop rect if provided, else fallback to card rect

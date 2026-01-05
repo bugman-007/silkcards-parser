@@ -1868,20 +1868,21 @@
               exportRectPt = cardRectPt;
               outName = layer.name;
             } else {
+              // Compute content bounds for all effect plates (guides/mattes already suppressed outside)
+              var contentBounds = collectLayerContentBounds(
+                layer,
+                rectW(cardRectPt),
+                rectH(cardRectPt)
+              );
+              if (!contentBounds) contentBounds = layerBounds || cardRectPt;
+              var clipped = intersectBounds(contentBounds, cardRectPt);
               if (type === "EMBOSS") {
-                exportRectPt = cardRectPt; // stable, avoids missing emboss art due to bounds heuristics
+                // Keep full-card emboss when it's actually on the card; otherwise export where the emboss lives
+                exportRectPt = clipped ? cardRectPt : contentBounds;
               } else {
-                var contentBounds = collectLayerContentBounds(
-                  layer,
-                  rectW(cardRectPt),
-                  rectH(cardRectPt)
-                );
-                if (!contentBounds) contentBounds = cardRectPt;
-            
-                var clipped = intersectBounds(contentBounds, cardRectPt);
+                // FOIL/UV/etc: crop to content when possible, otherwise export where it lives
                 exportRectPt = clipped ? clipped : contentBounds;
               }
-            
               outName = layer.name + "_mask";
             }
           

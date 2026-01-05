@@ -471,110 +471,193 @@
   // - Restores everything afterwards.
   // =========================
 
-  function isRectishStrokeOnly(it) {
+  function _getPathItems(it) {
+    // Normalize PathItem/CompoundPathItem to an array of PathItems
     try {
-      if (!it || it.typename !== "PathItem") return false;
-      if (!it.closed) return false;
-      if (!it.pathPoints || it.pathPoints.length !== 4) return false;
-      if (!it.stroked) return false;
-
-      // Must be "no fill"
-      if (it.filled) {
-        if (!it.fillColor) return false;
-        if (it.fillColor.typename !== "NoColor") return false;
+      if (!it) return [];
+      if (it.typename === "PathItem") return [it];
+      if (it.typename === "CompoundPathItem") {
+        var arr = [];
+        for (var i = 0; i < it.pathItems.length; i++) arr.push(it.pathItems[i]);
+        return arr;
+      }
+    } catch (e) {}
+    return [];
+  }
+  
+  function _isInClippedGroup(it) {
+    // Any ancestor GroupItem with clipped=true
+    try {
+      var p = it.parent;
+      while (p) {
+        if (p.typename === "GroupItem" && p.clipped) return true;
+        if (p.typename === "Layer") break;
+        p = p.parent;
+      }
+    } catch (e) {}
+    return false;
+  }
+  
+  function _isRectishStrokeOnlyPath(pi) {
+    try {
+      if (!pi || pi.typename !== "PathItem") return false;
+      if (!pi.closed) return false;
+      if (!pi.pathPoints || pi.pathPoints.length !== 4) return false;
+      if (!pi.stroked) return false;
+  
+      // No fill
+      if (pi.filled) {
+        if (!pi.fillColor) return false;
+        if (pi.fillColor.typename !== "NoColor") return false;
       }
       return true;
     } catch (e) {}
     return false;
   }
-
-  // More general than isLikelyGuideRect(): catches inset safe/bleed frames too.
+  
+  function isRectishStrokeOnly(it) {
+    var pis = _getPathItems(it);
+    if (pis.length === 0) return false;
+    // Treat as rect if ANY child path looks like a rect stroke-only
+    for (var i = 0; i < pis.length; i++) {
+      if (_isRectishStrokeOnlyPath(pis[i])) return true;
+    }
+    return false;
+  }
+  
   function isGuideRectForMaskPlates(it, b, cardRectPt) {
+    // Works for PathItem and CompoundPathItem
     if (!isRectishStrokeOnly(it)) return false;
-
+  
     // Named guides always count
     if (nameLooksGuide(it)) return true;
-
-    // Keep existing "near-card edge" heuristic too
-    if (cardRectPt && isLikelyGuideRect(it, b, cardRectPt)) return true;
-
+  
+    // Keep existing near-card-edge heuristic when we can
+    if (cardRectPt && it.typename === "PathItem" && isLikelyGuideRect(it, b, cardRectPt)) return true;
+  
     // Otherwise: red stroke rectangle of meaningful size -> treat as guide
-    try {
-      if (!isRedStrokeColor(it.strokeColor)) return false;
-    } catch (e2) {
-      return false;
+    var pis = _getPathItems(it);
+    var anyRed = false;
+    for (var i = 0; i < pis.length; i++) {
+      try {
+        if (isRedStrokeColor(pis[i].strokeColor)) { anyRed = true; break; }
+      } catch (e0) {}
     }
-
+    if (!anyRed) return false;
+  
     // Avoid nuking small red rectangles that could be real artwork
     if (cardRectPt && b) {
       var a = rectArea(b);
       var ca = rectArea(cardRectPt);
-      if (ca > 1 && (a / ca) < 0.02) return false; // <2% of card area: ignore
+      if (ca > 1 && (a / ca) < 0.02) return false; // <2% of card: ignore
     }
-
+  
     return true;
   }
-
+  
   function suppressGuideRectsForMaskExport(layer, cardRectPt) {
     var touched = [];
-
+  
     walkLayerItemsDeep(layer, function (it) {
       try { if (it.hidden) return; } catch (e0) {}
-
-      if (!it || it.typename !== "PathItem") return;
-
+  
+      // Handle PathItem + CompoundPathItem
+      if (!it || (it.typename !== "PathItem" && it.typename !== "CompoundPathItem")) return;
+  
       var b = getBounds(it);
       if (!b) return;
-
+  
       if (!isGuideRectForMaskPlates(it, b, cardRectPt)) return;
-
-      var rec = { it: it };
-
-      // save state
-      try { rec.wasHidden = it.hidden; } catch (e1) { rec.wasHidden = false; }
-      try { rec.wasStroked = it.stroked; } catch (e2) { rec.wasStroked = true; }
-      try { rec.wasStrokeWidth = it.strokeWidth; } catch (e3) { rec.wasStrokeWidth = 1; }
-      try { rec.wasStrokeColor = it.strokeColor; } catch (e4) {}
-
+  
+      // Determine clipping safety
       var isClip = false;
-      try { isClip = !!it.clipping; } catch (e5) { isClip = false; }
-
-      var parentClipped = false;
-      try {
-        parentClipped = (it.parent && it.parent.typename === "GroupItem" && it.parent.clipped);
-      } catch (e6) { parentClipped = false; }
-
-      // Apply suppression:
-      // - If clipping path / in clipped group: keep path, drop the visible stroke
-      // - Else: just hide it
-      try {
-        if (isClip || parentClipped) {
-          it.stroked = false;
-          it.strokeWidth = 0;
-        } else {
-          it.hidden = true;
+      try { isClip = !!it.clipping; } catch (e1) { isClip = false; }
+  
+      // For CompoundPathItem, its child paths can carry clipping flag
+      if (!isClip && it.typename === "CompoundPathItem") {
+        try {
+          for (var ci = 0; ci < it.pathItems.length; ci++) {
+            if (it.pathItems[ci] && it.pathItems[ci].clipping) { isClip = true; break; }
+          }
+        } catch (e2) {}
+      }
+  
+      var inClippedGroup = _isInClippedGroup(it);
+  
+      // If it is (or lives within) a clipped group, DO NOT hide it. Remove stroke instead.
+      if (isClip || inClippedGroup) {
+        var pis = _getPathItems(it);
+        for (var p = 0; p < pis.length; p++) {
+          var pi = pis[p];
+          if (!pi) continue;
+  
+          var rec = { kind: "path", it: pi };
+          try { rec.wasHidden = pi.hidden; } catch (e3) { rec.wasHidden = false; }
+          try { rec.wasStroked = pi.stroked; } catch (e4) { rec.wasStroked = true; }
+          try { rec.wasStrokeWidth = pi.strokeWidth; } catch (e5) { rec.wasStrokeWidth = 1; }
+          try { rec.wasStrokeColor = pi.strokeColor; } catch (e6) {}
+  
+          try {
+            pi.stroked = false;
+            pi.strokeWidth = 0;
+          } catch (e7) {}
+  
+          touched.push(rec);
         }
-      } catch (e7) {}
-
-      touched.push(rec);
+        return;
+      }
+  
+      // Not clipped: safe to hide the whole item.
+      // Prefer hiding the container (CompoundPathItem), fallback to hiding child paths.
+      var hid = false;
+      try {
+        var recC = { kind: "container", it: it };
+        try { recC.wasHidden = it.hidden; } catch (e8) { recC.wasHidden = false; }
+        it.hidden = true;
+        touched.push(recC);
+        hid = true;
+      } catch (e9) {}
+  
+      if (!hid) {
+        var pis2 = _getPathItems(it);
+        for (var q = 0; q < pis2.length; q++) {
+          var pi2 = pis2[q];
+          if (!pi2) continue;
+  
+          var rec2 = { kind: "path", it: pi2 };
+          try { rec2.wasHidden = pi2.hidden; } catch (e10) { rec2.wasHidden = false; }
+          try { pi2.hidden = true; } catch (e11) {}
+          touched.push(rec2);
+        }
+      }
     });
-
+  
+    try { app.redraw(); } catch (eR) {}
     return touched;
   }
-
+  
   function restoreSuppressedGuideRects(touched) {
     for (var i = 0; i < touched.length; i++) {
       var r = touched[i];
       var it = r.it;
       if (!it) continue;
-
-      try { it.hidden = r.wasHidden; } catch (e0) {}
-      try { it.stroked = r.wasStroked; } catch (e1) {}
-      try { it.strokeWidth = r.wasStrokeWidth; } catch (e2) {}
-      try { if (r.wasStrokeColor) it.strokeColor = r.wasStrokeColor; } catch (e3) {}
+  
+      if (r.kind === "container") {
+        try { it.hidden = r.wasHidden; } catch (e0) {}
+        continue;
+      }
+  
+      // path restore
+      try { it.hidden = r.wasHidden; } catch (e1) {}
+      if (r.hasOwnProperty("wasStroked")) {
+        try { it.stroked = r.wasStroked; } catch (e2) {}
+        try { it.strokeWidth = r.wasStrokeWidth; } catch (e3) {}
+        try { if (r.wasStrokeColor) it.strokeColor = r.wasStrokeColor; } catch (e4) {}
+      }
     }
+    try { app.redraw(); } catch (eR) {}
   }
-
+  
   function withGuideRectsSuppressed(layer, cardRectPt, fn) {
     var touched = suppressGuideRectsForMaskExport(layer, cardRectPt);
     try {
@@ -582,7 +665,7 @@
     } finally {
       restoreSuppressedGuideRects(touched);
     }
-  }
+  }  
 
   function exportDiecutOutlineSVGFromLayer(layer, svgBaseName, cardRectPt, svgRectPt) {
     var mapRectPt = svgRectPt || cardRectPt; // Use crop rect if provided, else fallback to card rect
@@ -1374,17 +1457,20 @@
               exportRectPt = cardRectPt;
               outName = layer.name;
             } else {
-              // Effects: crop to actual content (after guides are suppressed)
-              var contentBounds = collectLayerContentBounds(
-                layer,
-                rectW(cardRectPt),
-                rectH(cardRectPt)
-              );
-              if (!contentBounds) contentBounds = cardRectPt;
-          
-              var clipped = intersectBounds(contentBounds, cardRectPt);
-              exportRectPt = clipped ? clipped : contentBounds;
-          
+              if (type === "EMBOSS") {
+                exportRectPt = cardRectPt; // stable, avoids missing emboss art due to bounds heuristics
+              } else {
+                var contentBounds = collectLayerContentBounds(
+                  layer,
+                  rectW(cardRectPt),
+                  rectH(cardRectPt)
+                );
+                if (!contentBounds) contentBounds = cardRectPt;
+            
+                var clipped = intersectBounds(contentBounds, cardRectPt);
+                exportRectPt = clipped ? clipped : contentBounds;
+              }
+            
               outName = layer.name + "_mask";
             }
           

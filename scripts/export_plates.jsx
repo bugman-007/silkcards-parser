@@ -1479,9 +1479,6 @@
           if (!type) continue;
 
           soloLayer(layer);
-          if (type === "EMBOSS") {
-            expandAppearanceForSoloedLayer(layer);
-          }
           var layerBounds = collectLayerBounds(layer);
 
           if (!layerBounds) continue;

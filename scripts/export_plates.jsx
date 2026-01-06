@@ -894,7 +894,10 @@
           var iib = intersectBounds(bb, cardRectPt);
           if (!iib) continue;
   
-          if (rectArea(iib) / ca >= 0.95) fullKids.push(pi);
+          if (rectArea(iib) / ca >= 0.95) {
+            try { if (!isNearBlackFillColor(pi.fillColor)) continue; } catch (eNB) {}
+            fullKids.push(pi);
+          }
         }
   
         // Duplicate non-full-card children as positive filled shapes (stamp)
@@ -910,6 +913,8 @@
           // Don’t duplicate tiny noise
           var cb = getBounds(child);
           if (!cb) continue;
+          var iib2 = intersectBounds(cb, cardRectPt);
+          if (iib2 && rectArea(iib2) / ca >= 0.95) continue;
           if (rectArea(cb) / ca < 0.002) continue; // <0.2% card
   
           try {

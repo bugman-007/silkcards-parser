@@ -1865,12 +1865,15 @@
 
           soloLayer(layer);
 
-          // CRITICAL: make group-level fills/effects real geometry for emboss export
-          if (type === "EMBOSS") {
+          var layerBounds = collectLayerBounds(layer);
+
+          // EMBOSS/DEBOSS: keep it simple.
+          // Only expand appearance if we literally have no measurable geometry (some AI appearances don't expose bounds).
+          if (!layerBounds && type === "EMBOSS") {
             expandAppearanceForSoloedLayer(layer);
+            layerBounds = collectLayerBounds(layer);
           }
 
-          var layerBounds = collectLayerBounds(layer);
           if (!layerBounds) continue;
 
           var exportRectPt = null;
@@ -1882,21 +1885,19 @@
               exportRectPt = cardRectPt;
               outName = layer.name;
             } else {
-              // Compute content bounds for all effect plates (guides/mattes already suppressed outside)
+              // Compute content bounds for all effect plates (guides suppressed outside when applicable)
               var contentBounds = collectLayerContentBounds(
                 layer,
                 rectW(cardRectPt),
                 rectH(cardRectPt)
               );
               if (!contentBounds) contentBounds = layerBounds || cardRectPt;
+
               var clipped = intersectBounds(contentBounds, cardRectPt);
-              if (type === "EMBOSS") {
-                // Keep full-card emboss when it's actually on the card; otherwise export where the emboss lives
-                exportRectPt = clipped ? cardRectPt : contentBounds;
-              } else {
-                // FOIL/UV/etc: crop to content when possible, otherwise export where it lives
-                exportRectPt = clipped ? clipped : contentBounds;
-              }
+
+              // FOIL / UV / EMBOSS: identical behavior (simple + consistent)
+              exportRectPt = clipped ? clipped : contentBounds;
+
               outName = layer.name + "_mask";
             }
           
@@ -1906,10 +1907,9 @@
           var info;
           
           // Apply guide-rect suppression for mask exports that often contain those red frames.
-          // DO NOT apply to DIECUT: diecut paths are often red stroke lines and you’ll hide real cut geometry.
-          if (type === "EMBOSS") {
-            info = withEmbossMaskCleanup(layer, cardRectPt, doPlateExport);
-          } else if (type === "UV" || type === "FOIL") {
+          // Keep it SIMPLE for emboss/deboss: same path as FOIL/UV.
+          // (The emboss cleanup logic can break opacity-mask/appearance scaffolds and produce empty plates.)
+          if (type === "UV" || type === "FOIL" || type === "EMBOSS") {
             info = withGuideRectsSuppressed(layer, cardRectPt, doPlateExport);
           } else {
             info = doPlateExport();

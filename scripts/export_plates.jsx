@@ -147,49 +147,19 @@
   function expandAppearanceForSoloedLayer(targetLayer) {
     var oldUIL = app.userInteractionLevel;
     app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
-  
-    function selCount() {
-      try { return (doc.selection && doc.selection.length) ? doc.selection.length : 0; } catch (e) {}
-      return 0;
-    }
-  
-    function selectionHasExpandableVector() {
-      // expandStyle is most likely to STEX on pure raster/placed selections
-      try {
-        var sel = doc.selection;
-        if (!sel || !sel.length) return false;
-        for (var i = 0; i < sel.length; i++) {
-          var tn = "";
-          try { tn = sel[i].typename; } catch (e0) {}
-          if (tn === "PathItem" || tn === "CompoundPathItem" || tn === "TextFrame")
-            return true;
-        }
-      } catch (e) {}
-      return false;
-    }
-  
     try {
       try { doc.selection = null; } catch (e0) {}
   
       // Select everything visible (soloLayer already ran)
       try { app.executeMenuCommand("selectall"); } catch (e1) {}
   
-      if (selCount() === 0) return; // <-- prevents STEX on expand/group
+      // Expand appearance
+      try { app.executeMenuCommand("expandStyle"); } catch (e2) {}
+      try { app.executeMenuCommand("expand"); } catch (e3) {}
   
-      // Only attempt expand if there is at least some vector/text-ish selection
-      if (selectionHasExpandableVector()) {
-        try { app.executeMenuCommand("expandStyle"); } catch (e2) {}
-        if (selCount() > 0) {
-          try { app.executeMenuCommand("expand"); } catch (e3) {}
-        }
-      }
+      // Preserve relationships: group once, move the single group only
+      try { app.executeMenuCommand("group"); } catch (eg) {}
   
-      // Only group when there's actually something to group
-      if (selCount() >= 2) {
-        try { app.executeMenuCommand("group"); } catch (eg) {}
-      }
-  
-      // Move the single grouped result into the target layer (avoid moving many items)
       try {
         if (targetLayer) {
           var sel = doc.selection;
@@ -266,13 +236,6 @@
     return b;
   }
 
-  function getVisibleBounds(obj) {
-    var b = null;
-    try { b = obj.visibleBounds; } catch (e) {}
-    if (!isValidBounds(b) || rectW(b) < 0.01 || rectH(b) < 0.01) return null;
-    return b;
-  }  
-
   function walkPageItems(container, cb) {
     if (!container || !container.pageItems) return;
     for (var i = 0; i < container.pageItems.length; i++) {
@@ -329,80 +292,17 @@
     return false;
   }
 
-  function hasRenderableInkInRect(layer, rectPt) {
-    var hit = false;
-    walkLayerItemsDeep(layer, function (it) {
-      if (hit) return;
-      if (!isRenderableItem(it)) return;
-  
-      var b = getVisibleBounds(it);
-      if (!b) return;
-  
-      if (intersectBounds(b, rectPt)) hit = true;
-    });
-    return hit;
-  }  
-
   function collectLayerContentBounds(layer, cardW, cardH) {
     var bounds = null;
-  
     walkLayerItemsDeep(layer, function (it) {
-      if (!isRenderableItem(it)) return;
-  
-      // IMPORTANT: for “content”, use visible bounds (respects clipping + masks)
-      var b = getVisibleBounds(it);
+      try { if (it.hidden) return; } catch (e0) {}
+      var b = getBounds(it);
       if (!b) return;
-  
       if (isLikelyFrameItem(it, b, cardW, cardH)) return;
       bounds = unionBounds(bounds, b);
     });
-  
     return bounds;
-  }  
-
-  function isRenderableItem(it) {
-    if (!it) return false;
-  
-    try { if (it.hidden) return false; } catch (e0) {}
-    try { if (it.opacity !== undefined && it.opacity <= 0) return false; } catch (e1) {}
-  
-    var tn = "";
-    try { tn = it.typename; } catch (e2) {}
-  
-    // Path: renderable if it has visible fill or stroke
-    if (tn === "PathItem") {
-      try {
-        var hasFill = it.filled && !(it.fillColor && it.fillColor.typename === "NoColor");
-        var hasStroke = it.stroked && (it.strokeWidth === undefined || it.strokeWidth > 0);
-        return !!(hasFill || hasStroke);
-      } catch (e3) {
-        return true;
-      }
-    }
-  
-    // Compound path: renderable if any child path is renderable
-    if (tn === "CompoundPathItem") {
-      try {
-        for (var i = 0; i < it.pathItems.length; i++) {
-          if (isRenderableItem(it.pathItems[i])) return true;
-        }
-        return false;
-      } catch (e4) {
-        return true;
-      }
-    }
-  
-    // GroupItem: DO NOT assume it’s renderable.
-    // Many “empty” groups still have huge geometric bounds and will poison contentBounds.
-    // If it truly renders (appearance/opacity mask), visibleBounds should exist.
-    if (tn === "GroupItem") {
-      var vb = getVisibleBounds(it);
-      return !!vb;
-    }
-  
-    // Raster/text/etc: if it’s not hidden/opacity 0, treat as renderable
-    return true;
-  }  
+  }
 
   // =========================
   // Units
@@ -580,7 +480,7 @@
 
     // Otherwise require rectangle-ish + near-frame + red stroke
     var isRectish = false;
-    try { isRectish = it.closed && it.pathPoints && it.pathPoints.length >= 4; } catch (e1) {}
+    try { isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4; } catch (e1) {}
 
     if (!isRectish) return false;
 
@@ -1193,7 +1093,7 @@
     function isStrokeOnlyRectNearCard(it, b) {
       try {
         if (!it || it.typename !== "PathItem") return false;
-        var isRectish = it.closed && it.pathPoints && it.pathPoints.length >= 4;
+        var isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4;
         if (!isRectish) return false;
 
         var strokeOnly = it.stroked && (!it.filled || (it.fillColor && it.fillColor.typename === "NoColor"));
@@ -1216,7 +1116,7 @@
       if (isClip) return false;
       try {
         if (!it || it.typename !== "PathItem") return false;
-        var isRectish = it.closed && it.pathPoints && it.pathPoints.length >= 4;
+        var isRectish = it.closed && it.pathPoints && it.pathPoints.length === 4;
         if (!isRectish) return false;
 
         var hasFill = it.filled && !(it.fillColor && it.fillColor.typename === "NoColor");
@@ -1429,18 +1329,18 @@
       } catch (e) {}
 
       if (shouldUnite) {
-        // var oldUIL = app.userInteractionLevel;
-        // app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
-        // try {
-        //   app.executeMenuCommand("Live Pathfinder Add");
-        //   app.executeMenuCommand("expandStyle");
-        //   app.executeMenuCommand("ungroup");
-        //   app.executeMenuCommand("ungroup");
-        // } catch (e3) {
-        //   // ignore
-        // } finally {
-        //   app.userInteractionLevel = oldUIL;
-        // }
+        var oldUIL = app.userInteractionLevel;
+        app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
+        try {
+          app.executeMenuCommand("Live Pathfinder Add");
+          app.executeMenuCommand("expandStyle");
+          app.executeMenuCommand("ungroup");
+          app.executeMenuCommand("ungroup");
+        } catch (e3) {
+          // ignore
+        } finally {
+          app.userInteractionLevel = oldUIL;
+        }
       }
 
       // Convert resulting paths to stroke-only outline
@@ -1863,41 +1763,6 @@
     return best;
   }
 
-  function findLayerCardRectNearContent(layer, cardW, cardH) {
-    // Prefer the card-sized rectangle whose center is closest to the layer's actual visible content.
-    // This fixes stacked tiles: foil top / emboss bottom.
-    var target = collectLayerContentBounds(layer, cardW, cardH);
-    if (!target) target = collectLayerBounds(layer);
-    if (!target) return null;
-  
-    var tcx = (target[0] + target[2]) * 0.5;
-    var tcy = (target[1] + target[3]) * 0.5;
-  
-    var best = null;
-    var bestD = 1e18;
-  
-    walkLayerItemsDeep(layer, function (it) {
-      var b = getBounds(it);
-      if (!b) return;
-  
-      var w = rectW(b), h = rectH(b);
-      if (!approx(w, cardW, 0.03) || !approx(h, cardH, 0.03)) return;
-  
-      var cx = (b[0] + b[2]) * 0.5;
-      var cy = (b[1] + b[3]) * 0.5;
-      var dx = cx - tcx;
-      var dy = cy - tcy;
-      var d2 = dx * dx + dy * dy;
-  
-      if (d2 < bestD) {
-        bestD = d2;
-        best = b;
-      }
-    });
-  
-    return best;
-  }  
-
   // =========================
   // Meta
   // =========================
@@ -1993,67 +1858,58 @@
 
           var layerBounds = collectLayerBounds(layer);
           if (!layerBounds) continue;
-          var cardW = rectW(cardRectPt);
-          var cardH = rectH(cardRectPt);
 
-          // Find the correct per-layer tile rect (foil/emboss tiles can be stacked on the artboard)
-          var localSeed = findLayerCardRectNearContent(layer, cardW, cardH);
-          if (!localSeed) localSeed = findLayerCardRect(layer, cardW, cardH);
-
-          var localCardRectPt = localSeed ? centerRectAround(localSeed, cardW, cardH) : cardRectPt;
           var exportRectPt = null;
           var outName = null;
 
           function doPlateExport() {
             if (type === "PRINT") {
-              // PRINT should also follow the layer's tile rect (supports multi-tile docs)
-              exportRectPt = localCardRectPt;
+              // ALWAYS export prints at full card rect
+              exportRectPt = cardRectPt;
               outName = layer.name;
             } else {
-              var contentBounds = collectLayerContentBounds(layer, rectW(localCardRectPt), rectH(localCardRectPt));
-              if (!contentBounds) contentBounds = layerBounds || localCardRectPt;
-          
-              var clipped = intersectBounds(contentBounds, localCardRectPt);
-          
-              if (type === "DIECUT") {
-                // Keep diecut exports in full-card space
-                exportRectPt = localCardRectPt;
-              } else if (type === "EMBOSS") {
-                // Use the local tile rect for ink test; otherwise export where the content lives
-                exportRectPt = hasRenderableInkInRect(layer, localCardRectPt) ? localCardRectPt : contentBounds;
+              // Compute content bounds for all effect plates (guides/mattes already suppressed outside)
+              var contentBounds = collectLayerContentBounds(
+                layer,
+                rectW(cardRectPt),
+                rectH(cardRectPt)
+              );
+              if (!contentBounds) contentBounds = layerBounds || cardRectPt;
+              var clipped = intersectBounds(contentBounds, cardRectPt);
+              if (type === "EMBOSS") {
+                // Keep full-card emboss when it's actually on the card; otherwise export where the emboss lives
+                exportRectPt = clipped ? cardRectPt : contentBounds;
               } else {
-                // FOIL/UV: crop to content within tile when possible
+                // FOIL/UV/etc: crop to content when possible, otherwise export where it lives
                 exportRectPt = clipped ? clipped : contentBounds;
               }
-          
               outName = layer.name + "_mask";
             }
           
             return exportPNGClipped(outName, exportRectPt, dpiForced);
-          }                 
+          }
           
           var info;
           
           // Apply guide-rect suppression for mask exports that often contain those red frames.
           // DO NOT apply to DIECUT: diecut paths are often red stroke lines and you’ll hide real cut geometry.
           if (type === "EMBOSS") {
-            info = withEmbossMaskCleanup(layer, localCardRectPt, doPlateExport);
+            info = withEmbossMaskCleanup(layer, cardRectPt, doPlateExport);
           } else if (type === "UV" || type === "FOIL") {
-            info = withGuideRectsSuppressed(layer, localCardRectPt, doPlateExport);
+            info = withGuideRectsSuppressed(layer, cardRectPt, doPlateExport);
           } else {
             info = doPlateExport();
-          }
+          }     
 
           var assets = null;
 
           if (type === "DIECUT") {
-            // Export SVG in CARD space (cardRectPt), not PNG crop space (exportRectPt).
-            // Using exportRectPt here causes the "shift up by one card height" bug when tiles are stacked.
+            // Export SVG in the SAME coordinate space as the PNG crop (exportRectPt)
             var svgBase = outName;
           
-            var svgFile = exportDiecutOutlineSVGFromLayer(layer, svgBase, localCardRectPt, localCardRectPt);
+            var svgFile = exportDiecutOutlineSVGFromLayer(layer, svgBase, cardRectPt, exportRectPt);
             if (!svgFile) {
-              svgFile = exportDiecutOutlineSVGFromMaskPNG(outName + ".png", svgBase, localCardRectPt);
+              svgFile = exportDiecutOutlineSVGFromMaskPNG(outName + ".png", svgBase, exportRectPt);
             }
             if (!svgFile) throw new Error("Diecut SVG export failed: " + layer.name);
           
@@ -2064,7 +1920,7 @@
             g,
             type,
             outName,
-            localCardRectPt,
+            cardRectPt,
             exportRectPt,
             info.dpiUsed,
             info.wPx,

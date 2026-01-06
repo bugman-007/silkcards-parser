@@ -787,7 +787,9 @@
     try {
       if (it.typename === "PathItem") {
         if (!_looksRectishPath(it)) return false;
-        return _hasRealFill(it);
+        if (!_hasRealFill(it)) return false;
+        try { if (!isNearBlackFillColor(it.fillColor)) return false; } catch (e) {}
+        return true;
       }
   
       if (it.typename === "CompoundPathItem") {
@@ -804,6 +806,7 @@
           var iib = intersectBounds(bb, cardRectPt);
           if (!iib) continue;
   
+          try { if (!isNearBlackFillColor(pi.fillColor)) continue; } catch (eX) {}
           if (rectArea(iib) / ca >= 0.95) return true;
         }
         return false;
@@ -855,13 +858,19 @@
         try { rec.wasHidden = it.hidden; } catch (e3) { rec.wasHidden = false; }
         try { rec.wasFilled = it.filled; } catch (e4) { rec.wasFilled = true; }
         try { rec.wasFillColor = it.fillColor; } catch (e5) {}
-  
+      
         try {
-          // Never hide a full-card PathItem for emboss: it may be the opacity-mask/appearance carrier.
-          // Make it a stable black mask carrier instead.
-          makeBlackFill(it);
+          // This is a near-black, full-card filled matte. For emboss export it must NOT become a solid black slab
+          // (it can zero-out the plate via masks/appearance). Suppress it instead.
+          if (isClip || inClippedGroup) {
+            // Don't hide inside clipped structures (can break clipping); just remove the fill contribution.
+            it.filled = false;
+          } else {
+            // Safe: remove the matte from the export.
+            it.hidden = true;
+          }
         } catch (e6) {}
-  
+      
         touched.push(rec);
         return;
       }

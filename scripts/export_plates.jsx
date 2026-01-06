@@ -1833,6 +1833,41 @@
     return best;
   }
 
+  function findLayerCardRectNearContent(layer, cardW, cardH) {
+    // Prefer the card-sized rectangle whose center is closest to the layer's actual visible content.
+    // This fixes stacked tiles: foil top / emboss bottom.
+    var target = collectLayerContentBounds(layer, cardW, cardH);
+    if (!target) target = collectLayerBounds(layer);
+    if (!target) return null;
+  
+    var tcx = (target[0] + target[2]) * 0.5;
+    var tcy = (target[1] + target[3]) * 0.5;
+  
+    var best = null;
+    var bestD = 1e18;
+  
+    walkLayerItemsDeep(layer, function (it) {
+      var b = getBounds(it);
+      if (!b) return;
+  
+      var w = rectW(b), h = rectH(b);
+      if (!approx(w, cardW, 0.03) || !approx(h, cardH, 0.03)) return;
+  
+      var cx = (b[0] + b[2]) * 0.5;
+      var cy = (b[1] + b[3]) * 0.5;
+      var dx = cx - tcx;
+      var dy = cy - tcy;
+      var d2 = dx * dx + dy * dy;
+  
+      if (d2 < bestD) {
+        bestD = d2;
+        best = b;
+      }
+    });
+  
+    return best;
+  }  
+
   // =========================
   // Meta
   // =========================
@@ -1928,6 +1963,15 @@
 
           var layerBounds = collectLayerBounds(layer);
           if (!layerBounds) continue;
+          var cardW = rectW(cardRectPt);
+          var cardH = rectH(cardRectPt);
+
+          // Find the correct per-layer tile rect (foil/emboss tiles can be stacked on the artboard)
+          var localSeed = findLayerCardRectNearContent(layer, cardW, cardH);
+          if (!localSeed) localSeed = findLayerCardRect(layer, cardW, cardH);
+
+          var localCardRectPt = localSeed ? centerRectAround(localSeed, cardW, cardH) : cardRectPt;
+
           var localCardRectPt = findLayerCardRect(layer, rectW(cardRectPt), rectH(cardRectPt));
           if (localCardRectPt) {
             localCardRectPt = centerRectAround(localCardRectPt, rectW(cardRectPt), rectH(cardRectPt));
@@ -1940,24 +1984,23 @@
 
           function doPlateExport() {
             if (type === "PRINT") {
-              // Export prints at the layer's local card tile rect (normalizes stacked tiles)
+              // PRINT should also follow the layer's tile rect (supports multi-tile docs)
               exportRectPt = localCardRectPt;
               outName = layer.name;
             } else {
-              var contentBounds = collectLayerContentBounds(
-                layer,
-                rectW(localCardRectPt),
-                rectH(localCardRectPt)
-              );
+              var contentBounds = collectLayerContentBounds(layer, rectW(localCardRectPt), rectH(localCardRectPt));
               if (!contentBounds) contentBounds = layerBounds || localCardRectPt;
           
               var clipped = intersectBounds(contentBounds, localCardRectPt);
           
-              if (type === "EMBOSS") {
-                exportRectPt = hasRenderableInkInRect(layer, localCardRectPt)
-                  ? localCardRectPt
-                  : contentBounds;
+              if (type === "DIECUT") {
+                // Keep diecut exports in full-card space
+                exportRectPt = localCardRectPt;
+              } else if (type === "EMBOSS") {
+                // Use the local tile rect for ink test; otherwise export where the content lives
+                exportRectPt = hasRenderableInkInRect(layer, localCardRectPt) ? localCardRectPt : contentBounds;
               } else {
+                // FOIL/UV: crop to content within tile when possible
                 exportRectPt = clipped ? clipped : contentBounds;
               }
           
@@ -1965,7 +2008,7 @@
             }
           
             return exportPNGClipped(outName, exportRectPt, dpiForced);
-          }          
+          }                 
           
           var info;
           
@@ -1977,17 +2020,18 @@
             info = withGuideRectsSuppressed(layer, localCardRectPt, doPlateExport);
           } else {
             info = doPlateExport();
-          }  
+          }
 
           var assets = null;
 
           if (type === "DIECUT") {
-            // Export SVG in the SAME coordinate space as the PNG crop (exportRectPt)
+            // Export SVG in CARD space (cardRectPt), not PNG crop space (exportRectPt).
+            // Using exportRectPt here causes the "shift up by one card height" bug when tiles are stacked.
             var svgBase = outName;
           
-            var svgFile = exportDiecutOutlineSVGFromLayer(layer, svgBase, localCardRectPt, exportRectPt);
+            var svgFile = exportDiecutOutlineSVGFromLayer(layer, svgBase, cardRectPt, cardRectPt);
             if (!svgFile) {
-              svgFile = exportDiecutOutlineSVGFromMaskPNG(outName + ".png", svgBase, exportRectPt);
+              svgFile = exportDiecutOutlineSVGFromMaskPNG(outName + ".png", svgBase, cardRectPt);
             }
             if (!svgFile) throw new Error("Diecut SVG export failed: " + layer.name);
           

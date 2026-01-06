@@ -702,22 +702,6 @@
     }
   }
 
-  function exportEmbossMaskSimple(layer, cardRectPt, dpiForced) {
-    // FOIL-like behavior: guides suppressed + full-card export.
-    // Assumes caller already called soloLayer(layer).
-  
-    var exportRectPt = cardRectPt;
-    var outName = layer.name + "_mask";
-  
-    var info = withGuideRectsSuppressed(layer, cardRectPt, function () {
-      // Suppress guides BEFORE expanding so they don't get baked into expanded art.
-      expandAppearanceForSoloedLayer(layer);
-      return exportPNGClipped(outName, exportRectPt, dpiForced);
-    });
-  
-    return { outName: outName, exportRectPt: exportRectPt, info: info };
-  }  
-
   function exportDiecutOutlineSVGFromLayer(layer, svgBaseName, cardRectPt, svgRectPt) {
     var mapRectPt = svgRectPt || cardRectPt; // Use crop rect if provided, else fallback to card rect
     
@@ -1496,23 +1480,8 @@
 
           soloLayer(layer);
           if (type === "EMBOSS") {
-            var resE = exportEmbossMaskSimple(layer, cardRectPt, dpiForced);
-          
-            pushMeta(
-              g,
-              type,
-              resE.outName,
-              cardRectPt,
-              resE.exportRectPt,
-              resE.info.dpiUsed,
-              resE.info.wPx,
-              resE.info.hPx,
-              null
-            );
-          
-            continue;
+            expandAppearanceForSoloedLayer(layer);
           }
-
           var layerBounds = collectLayerBounds(layer);
 
           if (!layerBounds) continue;
@@ -1550,11 +1519,11 @@
           // Apply guide-rect suppression for mask exports that often contain those red frames.
           // Keep it SIMPLE for emboss/deboss: same path as FOIL/UV.
           // (The emboss cleanup logic can break opacity-mask/appearance scaffolds and produce empty plates.)
-          if (type === "UV" || type === "FOIL") {
+          if (type === "UV" || type === "FOIL" || type === "EMBOSS") {
             info = withGuideRectsSuppressed(layer, cardRectPt, doPlateExport);
           } else {
             info = doPlateExport();
-          }     
+          }  
 
           var assets = null;
 

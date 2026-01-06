@@ -147,19 +147,49 @@
   function expandAppearanceForSoloedLayer(targetLayer) {
     var oldUIL = app.userInteractionLevel;
     app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
+  
+    function selCount() {
+      try { return (doc.selection && doc.selection.length) ? doc.selection.length : 0; } catch (e) {}
+      return 0;
+    }
+  
+    function selectionHasExpandableVector() {
+      // expandStyle is most likely to STEX on pure raster/placed selections
+      try {
+        var sel = doc.selection;
+        if (!sel || !sel.length) return false;
+        for (var i = 0; i < sel.length; i++) {
+          var tn = "";
+          try { tn = sel[i].typename; } catch (e0) {}
+          if (tn === "PathItem" || tn === "CompoundPathItem" || tn === "TextFrame")
+            return true;
+        }
+      } catch (e) {}
+      return false;
+    }
+  
     try {
       try { doc.selection = null; } catch (e0) {}
   
       // Select everything visible (soloLayer already ran)
       try { app.executeMenuCommand("selectall"); } catch (e1) {}
   
-      // Expand appearance
-      try { app.executeMenuCommand("expandStyle"); } catch (e2) {}
-      try { app.executeMenuCommand("expand"); } catch (e3) {}
+      if (selCount() === 0) return; // <-- prevents STEX on expand/group
   
-      // Preserve relationships: group once, move the single group only
-      try { app.executeMenuCommand("group"); } catch (eg) {}
+      // Only attempt expand if there is at least some vector/text-ish selection
+      if (selectionHasExpandableVector()) {
+        try { app.executeMenuCommand("expandStyle"); } catch (e2) {}
+        if (selCount() > 0) {
+          try { app.executeMenuCommand("expand"); } catch (e3) {}
+        }
+      }
   
+      // Only group when there's actually something to group
+      if (selCount() >= 2) {
+        try { app.executeMenuCommand("group"); } catch (eg) {}
+      }
+  
+      // Move the single grouped result into the target layer (avoid moving many items)
       try {
         if (targetLayer) {
           var sel = doc.selection;
@@ -1399,18 +1429,18 @@
       } catch (e) {}
 
       if (shouldUnite) {
-        var oldUIL = app.userInteractionLevel;
-        app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
-        try {
-          app.executeMenuCommand("Live Pathfinder Add");
-          app.executeMenuCommand("expandStyle");
-          app.executeMenuCommand("ungroup");
-          app.executeMenuCommand("ungroup");
-        } catch (e3) {
-          // ignore
-        } finally {
-          app.userInteractionLevel = oldUIL;
-        }
+        // var oldUIL = app.userInteractionLevel;
+        // app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
+        // try {
+        //   app.executeMenuCommand("Live Pathfinder Add");
+        //   app.executeMenuCommand("expandStyle");
+        //   app.executeMenuCommand("ungroup");
+        //   app.executeMenuCommand("ungroup");
+        // } catch (e3) {
+        //   // ignore
+        // } finally {
+        //   app.userInteractionLevel = oldUIL;
+        // }
       }
 
       // Convert resulting paths to stroke-only outline
@@ -1971,14 +2001,6 @@
           if (!localSeed) localSeed = findLayerCardRect(layer, cardW, cardH);
 
           var localCardRectPt = localSeed ? centerRectAround(localSeed, cardW, cardH) : cardRectPt;
-
-          var localCardRectPt = findLayerCardRect(layer, rectW(cardRectPt), rectH(cardRectPt));
-          if (localCardRectPt) {
-            localCardRectPt = centerRectAround(localCardRectPt, rectW(cardRectPt), rectH(cardRectPt));
-          } else {
-            localCardRectPt = cardRectPt;
-          }
-
           var exportRectPt = null;
           var outName = null;
 
@@ -2029,9 +2051,9 @@
             // Using exportRectPt here causes the "shift up by one card height" bug when tiles are stacked.
             var svgBase = outName;
           
-            var svgFile = exportDiecutOutlineSVGFromLayer(layer, svgBase, cardRectPt, cardRectPt);
+            var svgFile = exportDiecutOutlineSVGFromLayer(layer, svgBase, localCardRectPt, localCardRectPt);
             if (!svgFile) {
-              svgFile = exportDiecutOutlineSVGFromMaskPNG(outName + ".png", svgBase, cardRectPt);
+              svgFile = exportDiecutOutlineSVGFromMaskPNG(outName + ".png", svgBase, localCardRectPt);
             }
             if (!svgFile) throw new Error("Diecut SVG export failed: " + layer.name);
           
